@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   ListToolsRequestSchema,
@@ -25,8 +27,11 @@ import {
   VisualClickInputSchema,
   PressHotkeyInputSchema,
   GetWindowScreenshotInputSchema,
+  ClipboardPasteInputSchema,
+  ExecuteActionSequenceInputSchema,
   normalizeHotkey,
 } from './engine/schemas.js';
+import { setSystemClipboard } from './engine/clipboard.js';
 
 export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
   {
@@ -129,8 +134,78 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           type: 'string',
           description: 'Optional file path to output a PNG with a red crosshair verifying click coordinates',
         },
+        delivery_mode: {
+          type: 'string',
+          enum: ['foreground', 'background'],
+          description: 'Delivery mode: foreground (default if allowed) or background (modal dialogs)',
+        },
       },
       required: ['window_id', 'pid'],
+    },
+  },
+  {
+    name: 'clipboard_paste',
+    description:
+      'Safely paste arbitrary text (including Russian/Cyrillic and symbols) into target window via system clipboard without keyboard layout corruption.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_id: { type: 'number', description: 'Target window ID' },
+        pid: { type: 'number', description: 'Target process ID' },
+        text: { type: 'string', description: 'Text to copy to clipboard and paste' },
+      },
+      required: ['window_id', 'pid', 'text'],
+    },
+  },
+  {
+    name: 'execute_action_sequence',
+    description:
+      'Execute a batch sequence of visual clicks, clipboard pastes, hotkeys, typing, and pauses in a single round-trip call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_id: { type: 'number', description: 'Target window ID' },
+        pid: { type: 'number', description: 'Target process ID' },
+        delivery_mode: {
+          type: 'string',
+          enum: ['foreground', 'background'],
+          description: 'Optional default delivery mode for clicks in this sequence',
+        },
+        delay_between_ms: {
+          type: 'number',
+          description: 'Delay between consecutive actions in milliseconds (default: 100ms)',
+        },
+        steps: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              action: {
+                type: 'string',
+                enum: ['click', 'double_click', 'right_click', 'paste', 'hotkey', 'type', 'sleep'],
+              },
+              x: { type: 'number', description: 'X coordinate' },
+              y: { type: 'number', description: 'Y coordinate' },
+              x_pixel: { type: 'number', description: 'Raw screenshot pixel X' },
+              y_pixel: { type: 'number', description: 'Raw screenshot pixel Y' },
+              x_percent: { type: 'number', description: 'Normalized X (0..1)' },
+              y_percent: { type: 'number', description: 'Normalized Y (0..1)' },
+              button: { type: 'string', enum: ['left', 'right', 'double'] },
+              delivery_mode: { type: 'string', enum: ['foreground', 'background'] },
+              text: { type: 'string', description: 'Text for paste or type action' },
+              keys: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Key combo for hotkey action',
+              },
+              ms: { type: 'number', description: 'Sleep duration in milliseconds' },
+            },
+            required: ['action'],
+          },
+          description: 'Ordered sequence of actions to execute',
+        },
+      },
+      required: ['window_id', 'pid', 'steps'],
     },
   },
   {
@@ -160,6 +235,14 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
       properties: {
         window_id: { type: 'number', description: 'Target window ID' },
         pid: { type: 'number', description: 'Target process ID' },
+        save_to_file: {
+          type: 'string',
+          description: 'Optional path on disk to write the captured PNG directly',
+        },
+        include_image: {
+          type: 'boolean',
+          description: 'Whether to include base64 image in tool response (default: true). Set false with save_to_file to save network bandwidth.',
+        },
       },
       required: ['window_id', 'pid'],
     },
@@ -455,6 +538,10 @@ export function createProxyServer(
       const cuaButton = button === 'right' ? 'right' : 'left';
       const count = button === 'double' ? 2 : 1;
 
+      const deliveryMode =
+        input.delivery_mode ??
+        (enforcer?.getConfig().allowForeground ? 'foreground' : 'background');
+
       const clickArgs: Record<string, unknown> = {
         pid: input.pid,
         window_id: input.window_id,
@@ -462,7 +549,7 @@ export function createProxyServer(
         y: cuaY,
         button: cuaButton,
         count,
-        delivery_mode: enforcer?.getConfig().allowForeground ? 'foreground' : 'background',
+        delivery_mode: deliveryMode,
       };
 
       if (input.debug_image_out) {
@@ -470,7 +557,21 @@ export function createProxyServer(
       }
 
       const callStartTime = Date.now();
-      const backendResult = await backend.callTool('click', clickArgs);
+      let backendResult = await backend.callTool('click', clickArgs);
+
+      // Graceful fallback for child/modal windows when debug_image_out fails due to retained image size mismatch
+      if (
+        backendResult.isError &&
+        clickArgs.debug_image_out &&
+        extractErrorText(backendResult).includes('debug_image_out write failed')
+      ) {
+        logger.warn(
+          'debug_image_out write failed due to child window retained image size mismatch; retrying click without debug overlay...'
+        );
+        const retryArgs = { ...clickArgs };
+        delete retryArgs.debug_image_out;
+        backendResult = await backend.callTool('click', retryArgs);
+      }
       const durationMs = Date.now() - callStartTime;
 
       audit.log({
@@ -653,7 +754,21 @@ export function createProxyServer(
           ? Number((width_px / logical_width).toFixed(2))
           : 2.0;
 
-      const metadata = {
+      let savedToFile: string | undefined;
+      if (input.save_to_file) {
+        try {
+          const dir = path.dirname(input.save_to_file);
+          if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+          fs.writeFileSync(input.save_to_file, buffer);
+          savedToFile = input.save_to_file;
+        } catch (err) {
+          logger.error('Failed to save screenshot to file:', err);
+        }
+      }
+
+      const metadata: Record<string, unknown> = {
         width_px,
         height_px,
         logical_width,
@@ -662,6 +777,9 @@ export function createProxyServer(
         window_id: input.window_id,
         pid: input.pid,
       };
+      if (savedToFile) {
+        metadata.saved_to_file = savedToFile;
+      }
 
       audit.log({
         tool: name,
@@ -671,15 +789,326 @@ export function createProxyServer(
         details: { ...args, ...metadata },
       });
 
+      const contentList: Array<{ type: string; [key: string]: unknown }> = [];
+      const includeImage = input.include_image !== false;
+      if (includeImage) {
+        contentList.push(imageItem as { type: string; [key: string]: unknown });
+      }
+      contentList.push({
+        type: 'text',
+        text: `Window screenshot captured${savedToFile ? ` and saved to ${savedToFile}` : ''}: ${width_px}x${height_px} px, logical: ${logical_width}x${logical_height}, scale: ${scale_factor}x`,
+      });
+
+      return {
+        content: contentList,
+        structuredContent: metadata,
+      };
+    }
+
+    // --- Vision Tool 4: clipboard_paste ---
+    if (name === 'clipboard_paste') {
+      const parseResult = ClipboardPasteInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        const errorMsg = parseResult.error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'INVALID_ARGUMENTS',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for clipboard_paste: ${errorMsg}` }],
+          structuredContent: { code: 'INVALID_ARGUMENTS', message: errorMsg },
+        };
+      }
+      const input = parseResult.data;
+      const callStartTime = Date.now();
+
+      try {
+        setSystemClipboard(input.text);
+      } catch (err) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Failed to set clipboard: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          structuredContent: { code: 'CLIPBOARD_ERROR', error: String(err) },
+        };
+      }
+
+      const backendResult = await backend.callTool('hotkey', {
+        pid: input.pid,
+        window_id: input.window_id,
+        keys: ['cmd', 'v'],
+        delivery_mode: 'background',
+      });
+      const durationMs = Date.now() - callStartTime;
+
+      const windowInfo = enforcer?.getWindowInfo(input.window_id);
+      audit.log({
+        tool: name,
+        target_bundle_id: windowInfo?.bundle_id ?? null,
+        status: backendResult.isError ? 'error' : 'ok',
+        duration_ms: durationMs,
+        details: { pid: input.pid, window_id: input.window_id, text_length: input.text.length },
+      });
+
+      if (backendResult.isError) {
+        return backendResult;
+      }
+
       return {
         content: [
-          imageItem,
           {
             type: 'text',
-            text: `Window screenshot captured: ${width_px}x${height_px} px, logical: ${logical_width}x${logical_height}, scale: ${scale_factor}x`,
+            text: `Pasted text (${input.text.length} chars) into window ${input.window_id} via clipboard.`,
           },
         ],
-        structuredContent: metadata,
+        structuredContent: {
+          status: 'ok',
+          pid: input.pid,
+          window_id: input.window_id,
+          text_length: input.text.length,
+        },
+      };
+    }
+
+    // --- Vision Tool 5: execute_action_sequence ---
+    if (name === 'execute_action_sequence') {
+      const parseResult = ExecuteActionSequenceInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        const errorMsg = parseResult.error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'INVALID_ARGUMENTS',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for execute_action_sequence: ${errorMsg}` }],
+          structuredContent: { code: 'INVALID_ARGUMENTS', message: errorMsg },
+        };
+      }
+      const input = parseResult.data;
+      const callStartTime = Date.now();
+      const defaultDeliveryMode =
+        input.delivery_mode ??
+        (enforcer?.getConfig().allowForeground ? 'foreground' : 'background');
+
+      // Fetch snapshot dimensions once if normalized percentage coordinates are used
+      let shot_w = 0;
+      let shot_h = 0;
+      const needsSnapshot = input.steps.some(
+        (s) =>
+          (s.action === 'click' || s.action === 'double_click' || s.action === 'right_click') &&
+          (typeof s.x_percent === 'number' || typeof s.y_percent === 'number')
+      );
+
+      if (needsSnapshot) {
+        try {
+          const snap = await backend.callTool('get_window_state', {
+            pid: input.pid,
+            window_id: input.window_id,
+            include_accessibility_tree: false,
+            include_screenshot: true,
+          });
+          const img = snap.content?.find((c) => c.type === 'image');
+          if (img && typeof (img as any).data === 'string') {
+            const b = Buffer.from((img as any).data, 'base64');
+            if (b.length >= 24) {
+              shot_w = b.readUInt32BE(16);
+              shot_h = b.readUInt32BE(20);
+            }
+          }
+        } catch (err) {
+          logger.warn('Failed to get snapshot for execute_action_sequence:', err);
+        }
+      }
+
+      const stepResults: Array<{ step: number; action: string; status: string; error?: string }> = [];
+      let executedSteps = 0;
+
+      for (let i = 0; i < input.steps.length; i++) {
+        const step = input.steps[i];
+        let stepStatus = 'ok';
+        let stepError: string | undefined;
+
+        try {
+          if (step.action === 'click' || step.action === 'double_click' || step.action === 'right_click') {
+            let targetX: number;
+            let targetY: number;
+
+            if (typeof step.x_pixel === 'number' && typeof step.y_pixel === 'number') {
+              targetX = Math.round(step.x_pixel);
+              targetY = Math.round(step.y_pixel);
+            } else if (typeof step.x === 'number' && typeof step.y === 'number') {
+              targetX = Math.round(step.x);
+              targetY = Math.round(step.y);
+            } else if (
+              typeof step.x_percent === 'number' &&
+              typeof step.y_percent === 'number' &&
+              shot_w > 0 &&
+              shot_h > 0
+            ) {
+              targetX = Math.round(step.x_percent * shot_w);
+              targetY = Math.round(step.y_percent * shot_h);
+            } else {
+              targetX = 0;
+              targetY = 0;
+            }
+
+            let button: 'left' | 'right' = 'left';
+            let count = 1;
+            if (step.action === 'double_click') {
+              count = 2;
+            } else if (step.action === 'right_click') {
+              button = 'right';
+            } else if (step.action === 'click') {
+              if (step.button === 'right') {
+                button = 'right';
+              } else if (step.button === 'double') {
+                count = 2;
+              }
+            }
+
+            const stepDelivery = step.delivery_mode ?? defaultDeliveryMode;
+            const res = await backend.callTool('click', {
+              pid: input.pid,
+              window_id: input.window_id,
+              x: targetX,
+              y: targetY,
+              button,
+              count,
+              delivery_mode: stepDelivery,
+            });
+
+            if (res.isError) {
+              stepStatus = 'error';
+              stepError = extractErrorText(res);
+            }
+          } else if (step.action === 'paste') {
+            setSystemClipboard(step.text);
+            const res = await backend.callTool('hotkey', {
+              pid: input.pid,
+              window_id: input.window_id,
+              keys: ['cmd', 'v'],
+              delivery_mode: 'background',
+            });
+            if (res.isError) {
+              stepStatus = 'error';
+              stepError = extractErrorText(res);
+            }
+          } else if (step.action === 'type') {
+            const res = await backend.callTool('type_text', {
+              pid: input.pid,
+              window_id: input.window_id,
+              text: step.text,
+              delivery_mode: 'background',
+            });
+            if (res.isError) {
+              stepStatus = 'error';
+              stepError = extractErrorText(res);
+            }
+          } else if (step.action === 'hotkey') {
+            const parsed = normalizeHotkey(step.keys);
+            let res: CallToolResult;
+            if (parsed.isSingleKey && parsed.singleKey) {
+              res = await backend.callTool('press_key', {
+                pid: input.pid,
+                window_id: input.window_id,
+                key: parsed.singleKey,
+                delivery_mode: 'background',
+              });
+            } else {
+              res = await backend.callTool('hotkey', {
+                pid: input.pid,
+                window_id: input.window_id,
+                keys: parsed.chord ?? step.keys,
+                delivery_mode: 'background',
+              });
+            }
+            if (res.isError) {
+              stepStatus = 'error';
+              stepError = extractErrorText(res);
+            }
+          } else if (step.action === 'sleep') {
+            await new Promise((resolve) => setTimeout(resolve, step.ms));
+          }
+        } catch (err) {
+          stepStatus = 'error';
+          stepError = err instanceof Error ? err.message : String(err);
+        }
+
+        stepResults.push({ step: i + 1, action: step.action, status: stepStatus, error: stepError });
+        executedSteps++;
+
+        if (stepStatus === 'error') {
+          break; // Stop sequence on error
+        }
+
+        // Apply delay_between_ms after action if not last step and not sleep
+        if (i < input.steps.length - 1 && step.action !== 'sleep' && input.delay_between_ms > 0) {
+          await new Promise((resolve) => setTimeout(resolve, input.delay_between_ms));
+        }
+      }
+
+      const durationMs = Date.now() - callStartTime;
+      const allSuccess = stepResults.every((r) => r.status === 'ok');
+      const windowInfo = enforcer?.getWindowInfo(input.window_id);
+
+      audit.log({
+        tool: name,
+        target_bundle_id: windowInfo?.bundle_id ?? null,
+        status: allSuccess ? 'ok' : 'error',
+        duration_ms: durationMs,
+        details: { total_steps: input.steps.length, executed_steps: executedSteps, step_results: stepResults },
+      });
+
+      if (!allSuccess) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `Action sequence failed at step ${executedSteps}/${input.steps.length}: ${
+                stepResults[stepResults.length - 1]?.error || 'Unknown error'
+              }`,
+            },
+          ],
+          structuredContent: {
+            status: 'error',
+            total_steps: input.steps.length,
+            executed_steps: executedSteps,
+            step_results: stepResults,
+          },
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Action sequence completed: ${executedSteps}/${input.steps.length} steps executed successfully in ${durationMs}ms.`,
+          },
+        ],
+        structuredContent: {
+          status: 'ok',
+          total_steps: input.steps.length,
+          executed_steps: executedSteps,
+          duration_ms: durationMs,
+          step_results: stepResults,
+        },
       };
     }
 

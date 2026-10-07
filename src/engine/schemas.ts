@@ -12,26 +12,94 @@ export const VisualClickInputSchema = z
     screenshot_width: z.number().positive().optional(),
     screenshot_height: z.number().positive().optional(),
     debug_image_out: z.string().optional(),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
   })
   .refine(
     (data) => {
       const hasPercent =
         typeof data.x_percent === 'number' && typeof data.y_percent === 'number';
       const hasPixels =
-        typeof data.x_pixel === 'number' &&
-        typeof data.y_pixel === 'number' &&
-        typeof data.screenshot_width === 'number' &&
-        typeof data.screenshot_height === 'number';
+        typeof data.x_pixel === 'number' && typeof data.y_pixel === 'number';
       return hasPercent || hasPixels;
     },
     {
       message:
-        'Must provide either (x_percent, y_percent [0.0..1.0]) or (x_pixel, y_pixel, screenshot_width, screenshot_height)',
+        'Must provide either (x_percent, y_percent [0.0..1.0]) or (x_pixel, y_pixel)',
       path: ['coordinates'],
     }
   );
 
 export type VisualClickInput = z.infer<typeof VisualClickInputSchema>;
+
+export const ClipboardPasteInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }),
+  text: z.string({ message: 'text must be a string' }),
+});
+
+export type ClipboardPasteInput = z.infer<typeof ClipboardPasteInputSchema>;
+
+export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('click'),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    x_pixel: z.number().optional(),
+    y_pixel: z.number().optional(),
+    x_percent: z.number().min(0).max(1).optional(),
+    y_percent: z.number().min(0).max(1).optional(),
+    button: z.enum(['left', 'right', 'double']).default('left'),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
+  }),
+  z.object({
+    action: z.literal('double_click'),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    x_pixel: z.number().optional(),
+    y_pixel: z.number().optional(),
+    x_percent: z.number().min(0).max(1).optional(),
+    y_percent: z.number().min(0).max(1).optional(),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
+  }),
+  z.object({
+    action: z.literal('right_click'),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    x_pixel: z.number().optional(),
+    y_pixel: z.number().optional(),
+    x_percent: z.number().min(0).max(1).optional(),
+    y_percent: z.number().min(0).max(1).optional(),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
+  }),
+  z.object({
+    action: z.literal('paste'),
+    text: z.string({ message: 'text is required for paste action' }),
+  }),
+  z.object({
+    action: z.literal('type'),
+    text: z.string({ message: 'text is required for type action' }),
+  }),
+  z.object({
+    action: z.literal('hotkey'),
+    keys: z.array(z.string()).min(1, 'keys array must contain at least one key'),
+  }),
+  z.object({
+    action: z.literal('sleep'),
+    ms: z.number().positive('ms must be positive'),
+  }),
+]);
+
+export type ActionSequenceStep = z.infer<typeof ActionSequenceStepSchema>;
+
+export const ExecuteActionSequenceInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+  delay_between_ms: z.number().nonnegative().default(100),
+  steps: z.array(ActionSequenceStepSchema).min(1, 'steps must contain at least one step'),
+});
+
+export type ExecuteActionSequenceInput = z.infer<typeof ExecuteActionSequenceInputSchema>;
 
 export const PressHotkeyInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
@@ -46,6 +114,8 @@ export type PressHotkeyInput = z.infer<typeof PressHotkeyInputSchema>;
 export const GetWindowScreenshotInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
   pid: z.number().int({ message: 'pid must be an integer' }),
+  save_to_file: z.string().optional(),
+  include_image: z.boolean().default(true).optional(),
 });
 
 export type GetWindowScreenshotInput = z.infer<typeof GetWindowScreenshotInputSchema>;

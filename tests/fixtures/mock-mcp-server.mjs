@@ -139,6 +139,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'type_text',
+        description: 'Types text',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number' },
+            window_id: { type: 'number' },
+            text: { type: 'string' },
+          },
+        },
+      },
+      {
         name: 'get_window_state',
         description: 'Get window state and screenshot',
         inputSchema: {
@@ -277,6 +289,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         {
           type: 'text',
           text: `Hotkey [${keys.join('+')}] pressed successfully`,
+        },
+      ],
+    };
+  }
+
+  if (name === 'type_text') {
+    const text = (args && args.text) || '';
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Typed "${text}" successfully`,
         },
       ],
     };
