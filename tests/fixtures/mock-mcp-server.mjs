@@ -114,6 +114,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'press_key',
+        description: 'Press single key',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number' },
+            window_id: { type: 'number' },
+            key: { type: 'string' },
+          },
+        },
+      },
+      {
+        name: 'hotkey',
+        description: 'Press hotkey chord',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number' },
+            window_id: { type: 'number' },
+            keys: { type: 'array', items: { type: 'string' } },
+          },
+        },
+      },
+      {
+        name: 'get_window_state',
+        description: 'Get window state and screenshot',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number' },
+            window_id: { type: 'number' },
+          },
+        },
+      },
     ],
   };
 });
@@ -221,6 +256,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: 'Click executed successfully',
         },
       ],
+    };
+  }
+
+  if (name === 'press_key') {
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Key ${(args && args.key) || 'unknown'} pressed successfully`,
+        },
+      ],
+    };
+  }
+
+  if (name === 'hotkey') {
+    const keys = (args && args.keys) || [];
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Hotkey [${keys.join('+')}] pressed successfully`,
+        },
+      ],
+    };
+  }
+
+  if (name === 'get_window_state') {
+    // 1600x1200 valid Retina PNG base64
+    const retinaPng =
+      'iVBORw0KGgoAAAANSUhEUgAABkAAAASwCAIAAAAsYxHAAAAV8klEQVR4nOzBAQEAAACAkP6v7ggKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwDQM4AAEBx2/LAAAAAElFTkSuQmCC';
+    return {
+      content: [
+        {
+          type: 'image',
+          data: retinaPng,
+          mimeType: 'image/png',
+        },
+        {
+          type: 'text',
+          text: 'Window state captured',
+        },
+      ],
+      structuredContent: {
+        window_bounds: { width: 800, height: 600, x: 100, y: 100 },
+        elements: [],
+      },
     };
   }
 

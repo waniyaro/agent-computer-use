@@ -19,6 +19,10 @@ export const MINIMAL_TOOLS_SET: ReadonlySet<string> = new Set([
   'task_journal_append',
   'task_journal_read',
   'task_journal_list',
+  // Vision & coordinate engine tools:
+  'visual_click',
+  'press_hotkey',
+  'get_window_screenshot',
 ]);
 
 export function filterToolsByProfile(tools: Tool[], profile: ToolProfile): Tool[] {

@@ -52,7 +52,7 @@ export class AppRecoveryManager {
     const { bundle_id, name } = params;
 
     // Validate bundle_id format strictly against injection
-    const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.-]+$/;
+    const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.\-\s:]+$/;
     if (!bundle_id || !BUNDLE_ID_REGEX.test(bundle_id)) {
       throw new Error(`Invalid bundle identifier format: '${bundle_id}'`);
     }

@@ -34,4 +34,10 @@ export interface WindowInfo {
   app_name: string;
   title?: string;
   bundle_id?: string;
+  bounds?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }

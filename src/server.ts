@@ -11,8 +11,22 @@ import { filterToolsByProfile } from './policy/filter.js';
 import { AuditLogger, auditLogger as defaultAuditLogger } from './audit/logger.js';
 import { JournalManager, journalManager as defaultJournalManager } from './journal/manager.js';
 import { AppRecoveryManager, isAppCrashError } from './recovery/app-manager.js';
-import { WindowInfo } from './policy/types.js';
+import { WindowInfo, PolicyCheckResult } from './policy/types.js';
 import { logger } from './utils/logger.js';
+import {
+  Bounds,
+  clamp,
+  normalizeFromScreenshot,
+  toLogicalScreenPoint,
+  toLogicalWindowPoint,
+  NormalizedPoint,
+} from './engine/coordinate-engine.js';
+import {
+  VisualClickInputSchema,
+  PressHotkeyInputSchema,
+  GetWindowScreenshotInputSchema,
+  normalizeHotkey,
+} from './engine/schemas.js';
 
 export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
   {
@@ -83,6 +97,67 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {},
+    },
+  },
+  {
+    name: 'visual_click',
+    description:
+      'Click at normalized (0.0..1.0) or pixel coordinates within a target window on Retina and multi-monitor setups.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_id: { type: 'number', description: 'Target window ID' },
+        pid: { type: 'number', description: 'Target process ID' },
+        x_percent: {
+          type: 'number',
+          description: 'Normalized X coordinate (0.0..1.0) relative to window top-left',
+        },
+        y_percent: {
+          type: 'number',
+          description: 'Normalized Y coordinate (0.0..1.0) relative to window top-left',
+        },
+        x_pixel: { type: 'number', description: 'X coordinate in screenshot pixels' },
+        y_pixel: { type: 'number', description: 'Y coordinate in screenshot pixels' },
+        screenshot_width: { type: 'number', description: 'Screenshot width in pixels' },
+        screenshot_height: { type: 'number', description: 'Screenshot height in pixels' },
+        button: {
+          type: 'string',
+          enum: ['left', 'right', 'double'],
+          description: 'Mouse button: left (default), right, or double',
+        },
+      },
+      required: ['window_id', 'pid'],
+    },
+  },
+  {
+    name: 'press_hotkey',
+    description:
+      'Emulate keyboard hotkeys or single keypress into target window (e.g. ["Command", "s"], ["Tab"]).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_id: { type: 'number', description: 'Target window ID' },
+        pid: { type: 'number', description: 'Target process ID' },
+        keys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of keys to press (e.g. ["Command", "s"] or ["Return"])',
+        },
+      },
+      required: ['window_id', 'pid', 'keys'],
+    },
+  },
+  {
+    name: 'get_window_screenshot',
+    description:
+      'Capture a clean window screenshot with physical and logical dimensions and Retina scale factor.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        window_id: { type: 'number', description: 'Target window ID' },
+        pid: { type: 'number', description: 'Target process ID' },
+      },
+      required: ['window_id', 'pid'],
     },
   },
 ];
@@ -243,8 +318,9 @@ export function createProxyServer(
     }
 
     // --- Backend Tools with Policy Enforcer & Crash Recovery ---
+    let check: PolicyCheckResult | undefined;
     if (enforcer) {
-      const check = await enforcer.enforce(name, args);
+      check = await enforcer.enforce(name, args);
 
       if (!check.allowed) {
         logger.warn(`Policy rejected call to ${name}: ${check.code} - ${check.reason}`);
@@ -276,7 +352,305 @@ export function createProxyServer(
           },
         };
       }
+    }
 
+    // --- Vision Tool 1: visual_click ---
+    if (name === 'visual_click') {
+      const parseResult = VisualClickInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        const errorMsg = parseResult.error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'INVALID_ARGUMENTS',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for visual_click: ${errorMsg}` }],
+          structuredContent: { code: 'INVALID_ARGUMENTS', message: errorMsg },
+        };
+      }
+      const input = parseResult.data;
+
+      // Resolve window bounds from cache or fallback
+      let windowInfo = enforcer?.getWindowInfo(input.window_id);
+      if (!windowInfo || !windowInfo.bounds) {
+        try {
+          const listRes = await backend.callTool('list_windows', {});
+          const sc = listRes.structuredContent as Record<string, unknown> | undefined;
+          if (sc && Array.isArray(sc.windows)) {
+            enforcer?.updateWindowCache(sc.windows as WindowInfo[]);
+            windowInfo = enforcer?.getWindowInfo(input.window_id);
+          }
+        } catch (err) {
+          logger.warn('Failed to refresh window cache during visual_click:', err);
+        }
+      }
+
+      const bounds: Bounds = windowInfo?.bounds ?? { x: 0, y: 0, width: 800, height: 600 };
+
+      let norm: NormalizedPoint;
+      if (typeof input.x_percent === 'number' && typeof input.y_percent === 'number') {
+        norm = {
+          x_pct: clamp(input.x_percent, 0, 1),
+          y_pct: clamp(input.y_percent, 0, 1),
+        };
+      } else {
+        norm = normalizeFromScreenshot(
+          input.x_pixel!,
+          input.y_pixel!,
+          input.screenshot_width!,
+          input.screenshot_height!
+        );
+      }
+
+      const windowLogical = toLogicalWindowPoint(norm, bounds);
+      const screenLogical = toLogicalScreenPoint(norm, bounds);
+
+      const button = input.button ?? 'left';
+      const cuaButton = button === 'right' ? 'right' : 'left';
+      const count = button === 'double' ? 2 : 1;
+
+      const clickArgs: Record<string, unknown> = {
+        pid: input.pid,
+        window_id: input.window_id,
+        x: windowLogical.windowX,
+        y: windowLogical.windowY,
+        button: cuaButton,
+        count,
+        delivery_mode: enforcer?.getConfig().allowForeground ? 'foreground' : 'background',
+      };
+
+      try {
+        await backend.callTool('get_window_state', {
+          pid: input.pid,
+          window_id: input.window_id,
+          include_accessibility_tree: false,
+          include_screenshot: true,
+        });
+      } catch (err) {
+        logger.warn('Failed to ensure snapshot before visual_click:', err);
+      }
+
+      const callStartTime = Date.now();
+      const backendResult = await backend.callTool('click', clickArgs);
+      const durationMs = Date.now() - callStartTime;
+
+      audit.log({
+        tool: name,
+        target_bundle_id: windowInfo?.bundle_id ?? null,
+        status: backendResult.isError ? 'error' : 'ok',
+        duration_ms: durationMs,
+        details: {
+          ...args,
+          coords: { normalized: norm, window_logical: windowLogical, screen_logical: screenLogical },
+        },
+      });
+
+      if (backendResult.isError) {
+        return backendResult;
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Visual click [${button}] executed at window (${windowLogical.windowX}, ${windowLogical.windowY}) [${(norm.x_pct * 100).toFixed(1)}%, ${(norm.y_pct * 100).toFixed(1)}%]`,
+          },
+        ],
+        structuredContent: {
+          status: 'ok',
+          button,
+          coords: {
+            normalized: norm,
+            window_logical: windowLogical,
+            screen_logical: screenLogical,
+          },
+          window_bounds: bounds,
+          pid: input.pid,
+          window_id: input.window_id,
+        },
+      };
+    }
+
+    // --- Vision Tool 2: press_hotkey ---
+    if (name === 'press_hotkey') {
+      const parseResult = PressHotkeyInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        const errorMsg = parseResult.error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'INVALID_ARGUMENTS',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for press_hotkey: ${errorMsg}` }],
+          structuredContent: { code: 'INVALID_ARGUMENTS', message: errorMsg },
+        };
+      }
+      const input = parseResult.data;
+
+      const parsed = normalizeHotkey(input.keys);
+      let backendResult: CallToolResult;
+      const callStartTime = Date.now();
+
+      if (parsed.isSingleKey && parsed.singleKey) {
+        backendResult = await backend.callTool('press_key', {
+          pid: input.pid,
+          window_id: input.window_id,
+          key: parsed.singleKey,
+          delivery_mode: 'background',
+        });
+      } else {
+        backendResult = await backend.callTool('hotkey', {
+          pid: input.pid,
+          window_id: input.window_id,
+          keys: parsed.chord ?? input.keys,
+          delivery_mode: 'background',
+        });
+      }
+      const durationMs = Date.now() - callStartTime;
+
+      audit.log({
+        tool: name,
+        target_bundle_id: null,
+        status: backendResult.isError ? 'error' : 'ok',
+        duration_ms: durationMs,
+        details: { ...args, parsed_keys: parsed },
+      });
+
+      if (backendResult.isError) {
+        return backendResult;
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Hotkey [${input.keys.join('+')}] pressed successfully.`,
+          },
+        ],
+        structuredContent: {
+          status: 'ok',
+          keys: input.keys,
+          parsed_keys: parsed,
+          pid: input.pid,
+          window_id: input.window_id,
+        },
+      };
+    }
+
+    // --- Vision Tool 3: get_window_screenshot ---
+    if (name === 'get_window_screenshot') {
+      const parseResult = GetWindowScreenshotInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        const errorMsg = parseResult.error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'INVALID_ARGUMENTS',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for get_window_screenshot: ${errorMsg}` }],
+          structuredContent: { code: 'INVALID_ARGUMENTS', message: errorMsg },
+        };
+      }
+      const input = parseResult.data;
+
+      const callStartTime = Date.now();
+      const stateResult = await backend.callTool('get_window_state', {
+        pid: input.pid,
+        window_id: input.window_id,
+        include_accessibility_tree: false,
+        include_screenshot: true,
+      });
+      const durationMs = Date.now() - callStartTime;
+
+      if (stateResult.isError) {
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'error',
+          duration_ms: durationMs,
+          details: args,
+        });
+        return stateResult;
+      }
+
+      const imageItem = stateResult.content?.find((c) => c.type === 'image');
+      if (!imageItem || typeof (imageItem as Record<string, unknown>).data !== 'string') {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'Screenshot image was not returned by backend.' }],
+          structuredContent: { code: 'NO_IMAGE', message: 'No image found in get_window_state response' },
+        };
+      }
+
+      const base64Data = (imageItem as { data: string }).data;
+      const buffer = Buffer.from(base64Data, 'base64');
+      let width_px = 0;
+      let height_px = 0;
+      if (buffer.length >= 24) {
+        width_px = buffer.readUInt32BE(16);
+        height_px = buffer.readUInt32BE(20);
+      }
+
+      const windowInfo = enforcer?.getWindowInfo(input.window_id);
+      const sc = stateResult.structuredContent as Record<string, unknown> | undefined;
+      const stateBounds = (sc?.window_bounds || sc?.bounds) as { width?: number; height?: number } | undefined;
+
+      const logical_width = stateBounds?.width ?? windowInfo?.bounds?.width ?? (width_px > 0 ? width_px / 2 : 800);
+      const logical_height = stateBounds?.height ?? windowInfo?.bounds?.height ?? (height_px > 0 ? height_px / 2 : 600);
+      const scale_factor =
+        logical_width > 0 && width_px > 0
+          ? Number((width_px / logical_width).toFixed(2))
+          : 2.0;
+
+      const metadata = {
+        width_px,
+        height_px,
+        logical_width,
+        logical_height,
+        scale_factor,
+        window_id: input.window_id,
+        pid: input.pid,
+      };
+
+      audit.log({
+        tool: name,
+        target_bundle_id: windowInfo?.bundle_id ?? null,
+        status: 'ok',
+        duration_ms: durationMs,
+        details: { ...args, ...metadata },
+      });
+
+      return {
+        content: [
+          imageItem,
+          {
+            type: 'text',
+            text: `Window screenshot captured: ${width_px}x${height_px} px, logical: ${logical_width}x${logical_height}, scale: ${scale_factor}x`,
+          },
+        ],
+        structuredContent: metadata,
+      };
+    }
+
+    if (enforcer) {
       // Execute on backend with duration measurement
       const callStartTime = Date.now();
       let result: CallToolResult = await backend.callTool(name, args);
@@ -298,7 +672,7 @@ export function createProxyServer(
           }
 
           // Check if autoRelaunch is enabled
-          if (enforcer.getConfig().autoRelaunch && check.targetBundleId && recoveryManager) {
+          if (enforcer.getConfig().autoRelaunch && check?.targetBundleId && recoveryManager) {
             logger.info(`autoRelaunch active: attempting automatic restart of ${check.targetBundleId}...`);
             try {
               const relaunch = await recoveryManager.ensureAppRunning({
@@ -342,7 +716,7 @@ export function createProxyServer(
                 message:
                   'Target application process terminated or is not running. Call ensure_app_running to relaunch, then call get_window_state.',
                 suggested_action: 'ensure_app_running',
-                target_bundle_id: check.targetBundleId ?? null,
+                target_bundle_id: check?.targetBundleId ?? null,
               },
             };
           }
@@ -361,7 +735,7 @@ export function createProxyServer(
       const auditDetails = prepareAuditDetails(name, args, enforcer.getConfig().logTypedText);
       audit.log({
         tool: name,
-        target_bundle_id: check.targetBundleId ?? null,
+        target_bundle_id: check?.targetBundleId ?? null,
         status: result.isError ? ((result.structuredContent as Record<string, unknown>)?.code as string ?? 'error') : 'ok',
         duration_ms: durationMs,
         details: auditDetails,

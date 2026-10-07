@@ -5,7 +5,7 @@ import { getStopFilePath } from './schema.js';
 import { isToolAllowedInProfile } from './filter.js';
 import { logger } from '../utils/logger.js';
 
-const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.-]+$/;
+const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.\-\s:]+$/;
 
 interface PidCacheEntry {
   bundleId: string | undefined;
@@ -97,6 +97,10 @@ export class PolicyEnforcer {
       }
     }
     logger.debug(`Updated window cache: ${windows.length} windows`);
+  }
+
+  getWindowInfo(windowId: number): WindowInfo | undefined {
+    return this.windowCache.get(windowId);
   }
 
   invalidatePid(pid: number): void {
