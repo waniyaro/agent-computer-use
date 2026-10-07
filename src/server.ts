@@ -125,6 +125,10 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           enum: ['left', 'right', 'double'],
           description: 'Mouse button: left (default), right, or double',
         },
+        debug_image_out: {
+          type: 'string',
+          description: 'Optional file path to output a PNG with a red crosshair verifying click coordinates',
+        },
       },
       required: ['window_id', 'pid'],
     },
@@ -411,6 +415,42 @@ export function createProxyServer(
       const windowLogical = toLogicalWindowPoint(norm, bounds);
       const screenLogical = toLogicalScreenPoint(norm, bounds);
 
+      let shot_w = 0;
+      let shot_h = 0;
+      try {
+        const snap = await backend.callTool('get_window_state', {
+          pid: input.pid,
+          window_id: input.window_id,
+          include_accessibility_tree: false,
+          include_screenshot: true,
+        });
+        const img = snap.content?.find((c) => c.type === 'image');
+        if (img && typeof (img as any).data === 'string') {
+          const b = Buffer.from((img as any).data, 'base64');
+          if (b.length >= 24) {
+            shot_w = b.readUInt32BE(16);
+            shot_h = b.readUInt32BE(20);
+          }
+        }
+      } catch (err) {
+        logger.warn('Failed to ensure snapshot before visual_click:', err);
+      }
+
+      // Cua Driver reverses Retina and window downscale from raw screenshot pixel coordinates
+      let cuaX: number;
+      let cuaY: number;
+
+      if (typeof input.x_pixel === 'number' && typeof input.y_pixel === 'number') {
+        cuaX = Math.round(input.x_pixel);
+        cuaY = Math.round(input.y_pixel);
+      } else if (shot_w > 0 && shot_h > 0) {
+        cuaX = Math.round(norm.x_pct * shot_w);
+        cuaY = Math.round(norm.y_pct * shot_h);
+      } else {
+        cuaX = windowLogical.windowX;
+        cuaY = windowLogical.windowY;
+      }
+
       const button = input.button ?? 'left';
       const cuaButton = button === 'right' ? 'right' : 'left';
       const count = button === 'double' ? 2 : 1;
@@ -418,22 +458,15 @@ export function createProxyServer(
       const clickArgs: Record<string, unknown> = {
         pid: input.pid,
         window_id: input.window_id,
-        x: windowLogical.windowX,
-        y: windowLogical.windowY,
+        x: cuaX,
+        y: cuaY,
         button: cuaButton,
         count,
         delivery_mode: enforcer?.getConfig().allowForeground ? 'foreground' : 'background',
       };
 
-      try {
-        await backend.callTool('get_window_state', {
-          pid: input.pid,
-          window_id: input.window_id,
-          include_accessibility_tree: false,
-          include_screenshot: true,
-        });
-      } catch (err) {
-        logger.warn('Failed to ensure snapshot before visual_click:', err);
+      if (input.debug_image_out) {
+        clickArgs.debug_image_out = input.debug_image_out;
       }
 
       const callStartTime = Date.now();

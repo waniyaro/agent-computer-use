@@ -11,6 +11,7 @@ export const VisualClickInputSchema = z
     y_pixel: z.number().optional(),
     screenshot_width: z.number().positive().optional(),
     screenshot_height: z.number().positive().optional(),
+    debug_image_out: z.string().optional(),
   })
   .refine(
     (data) => {
