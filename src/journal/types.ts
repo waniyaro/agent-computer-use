@@ -22,4 +22,5 @@ export interface AppendOptions {
 
 export interface ReadOptions {
   task_id?: string;
+  limit?: number;
 }

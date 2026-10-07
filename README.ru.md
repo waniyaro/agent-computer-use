@@ -2,7 +2,7 @@
 
 # 🖥️ /agent-computer-use
 
-**Надёжный слой безопасности, политик доступа и восстановления после сбоев для ИИ-агентов на macOS**
+**Экспериментальный слой безопасности, политик доступа и восстановления после сбоев для ИИ-агентов на macOS**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2014+-black.svg?logo=apple)]()
@@ -18,9 +18,9 @@
 
 </div>
 
-**`agent-computer-use`** — это открытый MCP-сервер (Model Context Protocol), функционирующий в качестве прокси и слоя безопасности поверх [Cua Driver](https://github.com/trycua/cua).
+**`agent-computer-use`** — это открытый, экспериментальный MCP-сервер (Model Context Protocol), функционирующий в качестве прокси и слоя безопасности поверх [Cua Driver](https://github.com/trycua/cua).
 
-В то время как низкоуровневые драйверы управления рабочим столом умеют лишь механически нажимать на кнопки и вводить текст, **`agent-computer-use` предоставляет критически важный слой корпоративной безопасности**: строгий контроль приложений по macOS Bundle ID, принцип Fail-Closed, мгновенный файловый Kill-Switch, очищенный от паролей аудит-лог, самовосстановление при падении приложений и долговечный журнал задач для автономных агентов.
+В то время как низкоуровневые драйверы управления рабочим столом умеют лишь механически нажимать на кнопки и вводить текст, **`agent-computer-use` предоставляет специализированный слой безопасности и надежности**: строгий контроль приложений по macOS Bundle ID, принцип Fail-Closed, мгновенный файловый Kill-Switch, очищенный от паролей аудит-лог с замером времени выполнения (`duration_ms`), инвалидацию устаревшего кэша PID, самовосстановление при падении приложений и долговечный журнал задач для автономных агентов.
 
 ---
 
@@ -39,8 +39,8 @@ graph TD
     subgraph ACU ["agent-computer-use (Прокси-сервер)"]
         direction TB
         subgraph Safety ["Слой безопасности и наблюдаемости"]
-            Enforcer["<b>PolicyEnforcer</b><br/>• Fail-Closed белый список<br/>• Приоритет запрещенных программ<br/>• Мгновенный STOP Kill-Switch"]:::module
-            Audit["<b>AuditLogger</b><br/>• Маскирование паролей и текста<br/>• Очистка скриншотов из логов<br/>• JSONL ротация при 10 МБ"]:::module
+            Enforcer["<b>PolicyEnforcer</b><br/>• Fail-Closed белый список<br/>• Проверка только по Bundle ID<br/>• Инвалидация кэша PID<br/>• Мгновенный STOP Kill-Switch"]:::module
+            Audit["<b>AuditLogger</b><br/>• Маскирование паролей и текста<br/>• Замер длительности duration_ms<br/>• Очистка скриншотов из логов<br/>• JSONL ротация при 10 МБ"]:::module
             Journal["<b>JournalManager</b><br/>• Долговечный Task Journal<br/>• Восстановление контекста"]:::module
         end
         Recovery["<b>AppRecoveryManager</b><br/>• Самовосстановление ensure_app_running<br/>• Детектор крашей autoRelaunch"]:::module
@@ -61,12 +61,12 @@ graph TD
 
 | Возможность | Что делает | Почему это важно |
 | :--- | :--- | :--- |
-| **🔒 Безопасность Fail-Closed** | Блокирует любые действия с окнами, если приложение явно не добавлено в `allowedApps`. | Защищает от неконтролируемых кликов агента в чужих окнах. |
-| **⛔ Защита критических программ** | Всегда блокирует менеджеры паролей (1Password, Bitwarden, Keychain), настройки macOS и Терминал. | Запрещенный список (`deniedApps`) имеет абсолютный приоритет даже при маске `*`. |
+| **🔒 Безопасность Fail-Closed** | Блокирует любые действия с окнами, если Bundle ID приложения явно не добавлен в `allowedApps`. | Защищает от неконтролируемых кликов агента в чужих окнах. |
+| **⛔ Защита критических программ** | Всегда блокирует менеджеры паролей (1Password, Bitwarden, Keychain), настройки macOS и Терминал по bundle ID. | Запрещенный список (`deniedApps`) имеет приоритет. Подделка имени приложения (spoofing) исключена. |
 | **🛑 Мгновенный Kill-Switch** | Создание файла `~/.config/agent-computer-use/STOP` моментально замораживает действия. | Позволяет экстренно остановить агента без убийства процессов IDE. |
-| **🤫 Конфиденциальный аудит** | Пишет JSONL-события с маскированием ввода (`logTypedText: false`) и удалением картинок. | Полный аудит действий без риска утечки паролей или забивания диска скриншотами. |
-| **🔄 Самовосстановление окон** | Инструмент `ensure_app_running` определяет закрытие или падение окна и перезапускает его. | Агент восстанавливает работу без краша контекста и застревания. |
-| **📝 Журнал задачи (Task Journal)** | Долговечный файл задач (`task_journal_*`) для каждой сессии. | Позволяет продолжить цепочку действий после очистки контекста или перезапуска IDE. |
+| **🤫 Конфиденциальный аудит** | Пишет JSONL-события с замером задержки, маскированием ввода (`logTypedText: false`) и удалением картинок. | Полный аудит действий без риска утечки паролей или забивания диска скриншотами. |
+| **🔄 Самовосстановление окон** | Инструмент `ensure_app_running` определяет закрытие или падение окна и перезапускает его, очищая устаревший кэш PID. | Агент восстанавливает работу без краша контекста и застревания. |
+| **📝 Журнал задачи (Task Journal)** | Долговечный файл задач (`task_journal_*`) для каждой сессии с поддержкой пагинации (`limit`). | Позволяет продолжить цепочку действий после очистки контекста или перезапуска IDE. |
 | **⚡ Минимальный профиль тулов** | Фильтрует 58 инструментов Cua Driver до 16 самых надежных и необходимых. | Экономит токены в контексте LLM, защищает от галлюцинаций и путаницы в тулах. |
 
 ---
@@ -74,12 +74,9 @@ graph TD
 ## 🚀 Быстрый старт
 
 ### 1. Системные требования
-- **ОС:** macOS 13+ (Ventura, Sonoma, Sequoia или новее; Apple Silicon и Intel).
+- **ОС:** macOS 14+ (Sonoma, Sequoia или новее; Apple Silicon и Intel) согласно требованиям Cua Driver.
 - **Node.js:** v20+ (рекомендуется v22 LTS).
-- **Cua Driver:** Устанавливается официальной командой:
-  ```bash
-  /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
-  ```
+- **Cua Driver:** Устанавливается согласно [официальной инструкции Cua Driver](https://github.com/trycua/cua). (Рекомендуется предварительно проверять установочные скрипты).
 
 ### 2. Установка
 ```bash
@@ -89,12 +86,12 @@ npm install
 npm run build
 ```
 
-### 3. Диагностика окружения (`acu doctor`)
+### 3. Диагностика системы (`acu doctor`)
 ```bash
 node dist/bin/acu.js doctor
 ```
 
-Команда `doctor` автоматически проверяет версию macOS, бинарник Cua Driver, права Accessibility и Screen Recording, схему политик и файлы клиентов:
+Диагностика проверяет версию macOS, бинарник Cua Driver, права TCC (Accessibility и Screen Recording), валидность конфига и клиентов:
 ```text
 ======================================================
            agent-computer-use Doctor Report           
@@ -112,6 +109,7 @@ node dist/bin/acu.js doctor
 --- 6. Client Integrations ---
   [OK]   Antigravity IDE: Configured in ~/.gemini/config/mcp_config.json
   [OK]   Claude Code: Configured in ~/.claude.json
+  [OK]   Codex: Not installed (optional)
 ------------------------------------------------------
 Overall Status: [OK]
 ======================================================
@@ -119,13 +117,13 @@ Overall Status: [OK]
 
 ### 4. Подключение к MCP-клиенту (`acu install`)
 
-Безопасная установка с предварительным просмотром (`--dry-run`) и созданием резервной копии (`.bak`):
+Установка с предварительным просмотром (dry-run) и созданием резервной копии:
 
 ```bash
-# Предварительный просмотр (без записи на диск)
+# Предварительный просмотр (безопасный dry-run)
 node dist/bin/acu.js install --client antigravity --dry-run
 
-# Запись с сохранением чужих серверов и бэкапом
+# Запись конфигурации (создает копию .bak и сохраняет все остальные MCP-серверы)
 node dist/bin/acu.js install --client antigravity --write
 ```
 
@@ -136,9 +134,9 @@ node dist/bin/acu.js install --client antigravity --write
 
 ---
 
-## 🛡️ Конфигурация безопасности (`policy.json`)
+## 🛡️ Конфигурация политик (`policy.json`)
 
-Путь к файлу: `~/.config/agent-computer-use/policy.json`
+Путь: `~/.config/agent-computer-use/policy.json`
 
 ```json
 {
@@ -152,19 +150,14 @@ node dist/bin/acu.js install --client antigravity --write
     "com.apple.keychainaccess",
     "com.apple.systempreferences",
     "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "1Password",
-    "Bitwarden",
-    "Keychain",
-    "System Settings",
-    "Terminal",
-    "iTerm"
+    "com.googlecode.iterm2"
   ],
   "maxActionsPerSession": 200,
   "toolProfile": "minimal",
   "allowForeground": false,
   "logTypedText": false,
-  "autoRelaunch": false
+  "autoRelaunch": false,
+  "allowAnyApp": false
 }
 ```
 
@@ -172,20 +165,37 @@ node dist/bin/acu.js install --client antigravity --write
 
 | Параметр | Тип | По умолчанию | Описание |
 | :--- | :--- | :--- | :--- |
-| `allowedApps` | `string[]` | `[]` | Белый список Bundle ID или имен приложений. Если пуст — действия заблокированы (**Fail-Closed**). |
-| `deniedApps` | `string[]` | `[...]` | Черный список критических приложений. Всегда проверяется до `allowedApps`. |
-| `maxActionsPerSession`| `number` | `200` | Лимит действий за сессию (защита от зацикливания агента). |
-| `toolProfile` | `"minimal" \| "full"` | `"minimal"` | `"minimal"` отдает 16 основных тулов; `"full"` отдает все 58 инструментов Cua Driver. |
-| `allowForeground` | `boolean` | `false` | При `false` запрещает режим `delivery_mode: foreground` (окна не крадут фокус). |
-| `logTypedText` | `boolean` | `false` | При `false` скрывает введенный текст в `audit.log` для защиты паролей. |
-| `autoRelaunch` | `boolean` | `false` | Автоматически перезапускает приложение при неожиданном краше. |
+| `allowedApps` | `string[]` | `[]` | Белый список Bundle ID (например, `"com.apple.calculator"`). Если список пуст, **все** действия блокируются (Fail-Closed). Wildcards не поддерживаются для предотвращения обхода. |
+| `deniedApps` | `string[]` | `[...]` | Черный список критических приложений по Bundle ID. Всегда проверяется до `allowedApps`. |
+| `maxActionsPerSession`| `number` | `200` | Лимит действий на сессию, предотвращающий зацикливание агента. |
+| `toolProfile` | `"minimal" \| "full"` | `"minimal"` | `"minimal"` отдает 16 базовых тулов; `"full"` открывает все 58 инструментов Cua Driver. |
+| `allowForeground` | `boolean` | `false` | При `false` запрещает `delivery_mode: "foreground"`, предотвращая перехват фокуса экрана у пользователя. |
+| `logTypedText` | `boolean` | `false` | При `false` маскирует вводимый текст в аудит-логе. |
+| `autoRelaunch` | `boolean` | `false` | Автоматически перезапускает приложение при сбое. |
+| `allowAnyApp` | `boolean` | `false` | Отключает фильтрацию по белому списку (не рекомендуется). Черный список по-прежнему соблюдается. |
+
+> [!IMPORTANT]
+> **Граница безопасности GUI и хост-окружение агента:**  
+> Список `deniedApps` и Policy Enforcer строго контролируют **исключительно действия GUI-автоматизации через данный MCP-прокси**. Они не позволяют агенту просматривать, кликать или вводить текст в защищенные графические окна macOS (такие как «Пароли», Связка ключей, Системные настройки, Редактор скриптов, Terminal.app или iTerm2).  
+> **Данный прокси НЕ изолирует хост-окружение агента и другие инструменты IDE.** Если у агента в IDE (например, в Antigravity, Claude Code, Cursor) есть доступ к консольным инструментам (`run_command`, `bash`, терминал), он исполняет команды напрямую в операционной системе в обход прокси. Блокировка `com.apple.Terminal` в `deniedApps` предотвращает манипуляции с окном Терминала через GUI-клики, но не является песочницей для фоновых shell-команд самого агента.
+
+#### Приложения в черном списке по умолчанию (`DEFAULT_DENIED_APPS`):
+- `com.1password.1password` (1Password)
+- `com.agilebits.onepassword7` (1Password 7)
+- `com.bitwarden.desktop` (Bitwarden)
+- `com.apple.keychainaccess` (Связка ключей)
+- `com.apple.Passwords` (Системное приложение «Пароли» macOS)
+- `com.apple.systempreferences` (Системные настройки macOS)
+- `com.apple.Terminal` (Терминал macOS)
+- `com.googlecode.iterm2` (iTerm2)
+- `com.apple.ScriptEditor2` (Редактор скриптов / Script Editor)
 
 ### Аварийный выключатель (Kill-Switch)
-Чтобы экстренно заблокировать все действия агента без перезапуска IDE:
+Для мгновенной остановки всех действий агента без перезапуска IDE:
 ```bash
 touch ~/.config/agent-computer-use/STOP
 ```
-Чтобы возобновить работу:
+Для возобновления работы:
 ```bash
 rm ~/.config/agent-computer-use/STOP
 ```
@@ -194,10 +204,10 @@ rm ~/.config/agent-computer-use/STOP
 
 ## 🛠️ Собственные инструменты прокси
 
-В дополнение к базовым инструментам Cua Driver (`click`, `type_text`, `scroll`, `get_window_state`), прокси предоставляет 4 инструмента надежности:
+В дополнение к базовым инструментам Cua Driver (`click`, `type_text`, `scroll`, `get_window_state`), `agent-computer-use` предоставляет 4 инструмента надежности:
 
 ### `ensure_app_running`
-Проверяет наличие активного окна приложения. Если процесс закрыт или упал, запускает его в фоне, дожидается инициализации окна и обновляет кэш процесса.
+Проверяет наличие процесса и окна. Если окно закрыто или упало, запускает его в фоне, ждет инициализации и сбрасывает устаревший кэш процесса.
 ```json
 {
   "bundle_id": "com.apple.calculator",
@@ -206,7 +216,7 @@ rm ~/.config/agent-computer-use/STOP
 ```
 
 ### `task_journal_append`
-Записывает промежуточный шаг, решение или статус в файл задачи (`~/.config/agent-computer-use/journal/<task_id>.jsonl`).
+Записывает веху, наблюдение или статус в JSONL-журнал сессии (`~/.config/agent-computer-use/journal/<task_id>.jsonl`).
 ```json
 {
   "note": "Посчитан результат 17 * 23 = 391",
@@ -215,45 +225,41 @@ rm ~/.config/agent-computer-use/STOP
 ```
 
 ### `task_journal_read`
-Считывает историю шагов, чтобы агент мог восстановить контекст после сжатия памяти или рестарта.
+Считывает контрольные точки (поддерживает `limit` и `task_id`; по умолчанию текущая сессия) для восстановления контекста агента.
 ```json
 {
-  "task_id": "session-20261007-152252-87a2df"
+  "limit": 20
 }
 ```
 
 ### `task_journal_list`
-Возвращает список всех сохраненных журналов задач с количеством шагов и статусом.
+Выводит список всех активных и архивных журналов задач со сводной статистикой.
 
 ---
 
 ## 🧪 Тестирование
 
-Набор тестов на Vitest проверяет устойчивость к падениям бэкенда, политики доступа, санитаризацию аудита и работу CLI:
+Тестовый набор Vitest проверяет устойчивость прокси, политики доступа, санитарную очистку аудита, журнал задач и CLI:
 
 ```bash
 npm test
 ```
 
 ```text
+ ✓ tests/audit.test.ts (5 tests)
  ✓ tests/cli.test.ts (9 tests)
- ✓ tests/policy.test.ts (6 tests)
+ ✓ tests/journal.test.ts (5 tests)
+ ✓ tests/policy.test.ts (10 tests)
  ✓ tests/proxy.test.ts (4 tests)
  ✓ tests/recovery.test.ts (4 tests)
 
- Test Files  4 passed (4)
-      Tests  23 passed (23)
+ Test Files  6 passed (6)
+      Tests  37 passed (37)
 ```
-
----
-
-## 🤝 Участие в разработке
-
-Мы рады контрибьюторам! Ознакомьтесь с [CONTRIBUTING.md](CONTRIBUTING.md) и [SECURITY.md](SECURITY.md) перед созданием Pull Request.
 
 ---
 
 ## 📄 Лицензия
 
-Проект распространяется под лицензией [MIT](LICENSE).  
-Драйвер автоматизации: [Cua Driver](https://github.com/trycua/cua) (лицензия MIT).
+Распространяется под лицензией [MIT](LICENSE).  
+Драйвер автоматизации основан на [Cua Driver](https://github.com/trycua/cua) (MIT License).

@@ -91,7 +91,11 @@ export class JournalManager {
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       const lines = content.trim().split('\n').filter(Boolean);
-      return lines.map((line) => JSON.parse(line) as JournalEntry);
+      const entries = lines.map((line) => JSON.parse(line) as JournalEntry);
+      if (options?.limit && options.limit > 0) {
+        return entries.slice(-options.limit);
+      }
+      return entries;
     } catch (err) {
       logger.error(`Failed to read journal file ${filePath}:`, err);
       return [];

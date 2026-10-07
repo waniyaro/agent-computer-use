@@ -1,8 +1,47 @@
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { PolicyConfig, PolicyCheckResult, WindowInfo } from './types.js';
 import { getStopFilePath } from './schema.js';
 import { isToolAllowedInProfile } from './filter.js';
 import { logger } from '../utils/logger.js';
+
+const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.-]+$/;
+
+interface PidCacheEntry {
+  bundleId: string | undefined;
+  expiresAt: number;
+}
+
+const pidBundleIdCache = new Map<number, PidCacheEntry>();
+const PID_CACHE_TTL_MS = 10000;
+
+export function getBundleIdForPid(pid: unknown): string | undefined {
+  // Strict numeric validation to prevent command injection
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || pid > 4194304) {
+    return undefined;
+  }
+
+  const now = Date.now();
+  const cached = pidBundleIdCache.get(pid);
+  if (cached && cached.expiresAt > now) {
+    return cached.bundleId;
+  }
+
+  try {
+    // Pure binary execution without shell interpolation (argv vector)
+    const out = execFileSync('/usr/bin/lsappinfo', ['info', '-only', 'bundleid', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    const match = out.match(/"CFBundleIdentifier"="([^"]+)"/);
+    const resolved = match && BUNDLE_ID_REGEX.test(match[1]) ? match[1] : undefined;
+    pidBundleIdCache.set(pid, { bundleId: resolved, expiresAt: now + PID_CACHE_TTL_MS });
+    return resolved;
+  } catch {
+    pidBundleIdCache.set(pid, { bundleId: undefined, expiresAt: now + PID_CACHE_TTL_MS });
+  }
+  return undefined;
+}
 
 export const INSPECTION_TOOLS: ReadonlySet<string> = new Set([
   'list_apps',
@@ -48,6 +87,9 @@ export class PolicyEnforcer {
     this.windowCache.clear();
     this.pidCache.clear();
     for (const w of windows) {
+      if (!w.bundle_id && typeof w.pid === 'number') {
+        w.bundle_id = getBundleIdForPid(w.pid);
+      }
       this.windowCache.set(w.window_id, w);
       this.pidCache.set(w.pid, w);
       if (w.bundle_id && w.app_name) {
@@ -55,6 +97,34 @@ export class PolicyEnforcer {
       }
     }
     logger.debug(`Updated window cache: ${windows.length} windows`);
+  }
+
+  invalidatePid(pid: number): void {
+    const cached = this.pidCache.get(pid);
+    if (cached) {
+      this.windowCache.delete(cached.window_id);
+    }
+    this.pidCache.delete(pid);
+    pidBundleIdCache.delete(pid);
+    logger.debug(`Invalidated window cache for pid ${pid}`);
+  }
+
+  invalidateWindow(windowId: number): void {
+    const cached = this.windowCache.get(windowId);
+    if (cached) {
+      this.pidCache.delete(cached.pid);
+      pidBundleIdCache.delete(cached.pid);
+    }
+    this.windowCache.delete(windowId);
+    logger.debug(`Invalidated window cache for window ${windowId}`);
+  }
+
+  clearWindowCache(): void {
+    this.windowCache.clear();
+    this.pidCache.clear();
+    this.appBundleCache.clear();
+    pidBundleIdCache.clear();
+    logger.debug('Cleared all window and process caches');
   }
 
   /**
@@ -105,7 +175,25 @@ export class PolicyEnforcer {
       return { allowed: true };
     }
 
-    // 6. Application Resolution and Allowlist/Denylist Check
+    // 6. Cross-check pid and window_id to prevent mismatch attacks
+    const argPid = typeof args.pid === 'number' ? args.pid : undefined;
+    const argWindowId = typeof args.window_id === 'number' ? args.window_id : undefined;
+
+    if (argPid !== undefined && argWindowId !== undefined) {
+      const win = this.windowCache.get(argWindowId);
+      if (win && win.pid !== argPid) {
+        logger.warn(
+          `Target mismatch: window_id ${argWindowId} belongs to PID ${win.pid} ('${win.app_name}'), but call specified PID ${argPid}`
+        );
+        return {
+          allowed: false,
+          code: 'TARGET_MISMATCH',
+          reason: `Target mismatch: window_id ${argWindowId} belongs to PID ${win.pid} ('${win.app_name}'), but tool call specified PID ${argPid}.`,
+        };
+      }
+    }
+
+    // 7. Application Resolution and Allowlist/Denylist Check
     const target = this.resolveTargetApp(toolName, args);
 
     if (!target) {
@@ -119,8 +207,8 @@ export class PolicyEnforcer {
 
     const { bundleId, appName } = target;
 
-    // Check Denied Apps first (Deny takes precedence over Allow)
-    if (this.isAppInList(bundleId, appName, this.config.deniedApps)) {
+    // Check Denied Apps first (Deny takes precedence over Allow; matching by bundle ID only)
+    if (this.isAppInList(bundleId, this.config.deniedApps)) {
       return {
         allowed: false,
         code: 'APP_DENIED',
@@ -129,8 +217,10 @@ export class PolicyEnforcer {
       };
     }
 
-    // Check Allowed Apps
-    if (!this.isAppInList(bundleId, appName, this.config.allowedApps)) {
+    // Check Allowed Apps (Strict bundle ID verification or explicit allowAnyApp: true)
+    const isAllowed =
+      this.config.allowAnyApp === true || this.isAppInList(bundleId, this.config.allowedApps);
+    if (!isAllowed) {
       return {
         allowed: false,
         code: 'APP_NOT_ALLOWED',
@@ -158,12 +248,14 @@ export class PolicyEnforcer {
     if (toolName === 'launch_app') {
       const bundleId = (args.bundle_id as string) || '';
       const name = (args.name as string) || '';
-      if (bundleId) {
+      if (bundleId && BUNDLE_ID_REGEX.test(bundleId)) {
         return { bundleId, appName: name || bundleId };
       }
       if (name) {
-        const cachedBundle = this.appBundleCache.get(name.toLowerCase()) || name;
-        return { bundleId: cachedBundle, appName: name };
+        const cachedBundle = this.appBundleCache.get(name.toLowerCase());
+        if (cachedBundle && BUNDLE_ID_REGEX.test(cachedBundle)) {
+          return { bundleId: cachedBundle, appName: name };
+        }
       }
       return null;
     }
@@ -172,20 +264,36 @@ export class PolicyEnforcer {
     const windowId = typeof args.window_id === 'number' ? args.window_id : undefined;
     if (windowId !== undefined && this.windowCache.has(windowId)) {
       const win = this.windowCache.get(windowId)!;
-      return {
-        bundleId: win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase()) || win.app_name,
-        appName: win.app_name,
-      };
+      let bundleId = win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase());
+      if (!bundleId && typeof win.pid === 'number') {
+        bundleId = getBundleIdForPid(win.pid);
+        if (bundleId) win.bundle_id = bundleId;
+      }
+      if (bundleId) {
+        return { bundleId, appName: win.app_name };
+      }
+      return null;
     }
 
     // Resolve by pid
     const pid = typeof args.pid === 'number' ? args.pid : undefined;
-    if (pid !== undefined && this.pidCache.has(pid)) {
-      const win = this.pidCache.get(pid)!;
-      return {
-        bundleId: win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase()) || win.app_name,
-        appName: win.app_name,
-      };
+    if (pid !== undefined) {
+      if (this.pidCache.has(pid)) {
+        const win = this.pidCache.get(pid)!;
+        let bundleId = win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase());
+        if (!bundleId) {
+          bundleId = getBundleIdForPid(pid);
+          if (bundleId) win.bundle_id = bundleId;
+        }
+        if (bundleId) {
+          return { bundleId, appName: win.app_name };
+        }
+        return null;
+      }
+      const resolved = getBundleIdForPid(pid);
+      if (resolved) {
+        return { bundleId: resolved, appName: resolved };
+      }
     }
 
     // Try target object if provided: target: { pid, window_id }
@@ -194,18 +302,34 @@ export class PolicyEnforcer {
       const tWindowId = typeof targetObj.window_id === 'number' ? targetObj.window_id : undefined;
       if (tWindowId !== undefined && this.windowCache.has(tWindowId)) {
         const win = this.windowCache.get(tWindowId)!;
-        return {
-          bundleId: win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase()) || win.app_name,
-          appName: win.app_name,
-        };
+        let bundleId = win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase());
+        if (!bundleId && typeof win.pid === 'number') {
+          bundleId = getBundleIdForPid(win.pid);
+          if (bundleId) win.bundle_id = bundleId;
+        }
+        if (bundleId) {
+          return { bundleId, appName: win.app_name };
+        }
+        return null;
       }
       const tPid = typeof targetObj.pid === 'number' ? targetObj.pid : undefined;
-      if (tPid !== undefined && this.pidCache.has(tPid)) {
-        const win = this.pidCache.get(tPid)!;
-        return {
-          bundleId: win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase()) || win.app_name,
-          appName: win.app_name,
-        };
+      if (tPid !== undefined) {
+        if (this.pidCache.has(tPid)) {
+          const win = this.pidCache.get(tPid)!;
+          let bundleId = win.bundle_id || this.appBundleCache.get(win.app_name.toLowerCase());
+          if (!bundleId) {
+            bundleId = getBundleIdForPid(tPid);
+            if (bundleId) win.bundle_id = bundleId;
+          }
+          if (bundleId) {
+            return { bundleId, appName: win.app_name };
+          }
+          return null;
+        }
+        const resolved = getBundleIdForPid(tPid);
+        if (resolved) {
+          return { bundleId: resolved, appName: resolved };
+        }
       }
     }
 
@@ -213,23 +337,15 @@ export class PolicyEnforcer {
   }
 
   /**
-   * Checks whether bundleId or appName matches any entry in list (supports exact & case-insensitive matching).
+   * Checks whether bundleId matches any entry in list (exact case-insensitive bundle ID match only).
    */
-  private isAppInList(bundleId: string, appName: string, list: string[]): boolean {
-    if (list.includes('*')) {
-      return true;
-    }
-
+  private isAppInList(bundleId: string, list: string[]): boolean {
     const bLower = bundleId.toLowerCase();
-    const aLower = appName.toLowerCase();
-
     for (const item of list) {
-      const iLower = item.toLowerCase();
-      if (iLower === bLower || iLower === aLower) {
+      if (item.toLowerCase() === bLower) {
         return true;
       }
     }
-
     return false;
   }
 }

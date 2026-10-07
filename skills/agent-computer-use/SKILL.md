@@ -41,7 +41,9 @@ Agents MUST adhere strictly to the three-step operating cycle for EVERY GUI inte
 - **Always include identifiers:** Every action call (`click`, `type_text`, `scroll`, `get_window_state`, etc.) MUST specify both:
   - `pid` (Process ID of the target app)
   - `window_id` (Window ID of the target window)
-- **Cache Population:** Before first interacting with an application, call `list_windows` to populate the proxy's active process cache and ensure the app is recognized by the security policy enforcer.
+- **Cache Population & Invalidation:**
+  - Before first interacting with an application, call `list_windows` to populate the proxy's active process cache and ensure the app is recognized by the security policy enforcer.
+  - If an application crashes or is relaunched via `ensure_app_running`, the proxy **automatically invalidates stale PID and window caches**. In this case, you MUST call `list_windows` again to discover the new PID.
 
 ---
 
@@ -74,7 +76,7 @@ The `agent-computer-use` proxy maintains a durable JSONL task journal per sessio
 - **Context Resumption:**
   - If agent context was compacted, lost, or the conversation was restarted, FIRST call:
     ```json
-    task_journal_read()
+    task_journal_read({ "limit": 20 })
     ```
   - Review historical checkpoints before initiating any new actions.
 

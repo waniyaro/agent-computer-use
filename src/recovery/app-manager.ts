@@ -51,6 +51,12 @@ export class AppRecoveryManager {
   async ensureAppRunning(params: EnsureAppRunningParams): Promise<EnsureAppRunningResult> {
     const { bundle_id, name } = params;
 
+    // Validate bundle_id format strictly against injection
+    const BUNDLE_ID_REGEX = /^[A-Za-z0-9_.-]+$/;
+    if (!bundle_id || !BUNDLE_ID_REGEX.test(bundle_id)) {
+      throw new Error(`Invalid bundle identifier format: '${bundle_id}'`);
+    }
+
     // 1. Policy check: must be allowed by enforcer
     const check = await this.enforcer.enforce('launch_app', {
       bundle_id,

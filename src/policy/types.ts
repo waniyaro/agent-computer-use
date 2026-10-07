@@ -8,6 +8,7 @@ export interface PolicyConfig {
   allowForeground: boolean;
   logTypedText: boolean;
   autoRelaunch: boolean;
+  allowAnyApp?: boolean;
 }
 
 export type PolicyErrorCode =
@@ -16,6 +17,7 @@ export type PolicyErrorCode =
   | 'APP_DENIED'
   | 'APP_NOT_ALLOWED'
   | 'APP_UNKNOWN'
+  | 'TARGET_MISMATCH'
   | 'FOREGROUND_NOT_ALLOWED'
   | 'TOOL_NOT_ALLOWED';
 

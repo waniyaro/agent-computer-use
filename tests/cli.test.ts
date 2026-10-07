@@ -177,7 +177,7 @@ describe('CLI - Doctor and Install Tests', () => {
       const customPolicy = path.join(tmpDir, 'policy.json');
 
       const result = runInstall({
-        client: 'claude-code',
+        client: 'antigravity',
         write: true,
         customConfigPath: customConfig,
         policyConfigPath: customPolicy,
@@ -189,6 +189,22 @@ describe('CLI - Doctor and Install Tests', () => {
 
       const policyContent = JSON.parse(fs.readFileSync(customPolicy, 'utf8'));
       expect(policyContent.toolProfile).toBe('full');
+    });
+
+    it('refuses to write configuration file for claude-code and outputs claude mcp add instructions', () => {
+      const customConfig = path.join(tmpDir, 'claude_config.json');
+
+      const result = runInstall({
+        client: 'claude-code',
+        write: true,
+        customConfigPath: customConfig,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.dryRun).toBe(true);
+      expect(fs.existsSync(customConfig)).toBe(false);
+      expect(result.message).toContain('claude mcp add agent-computer-use -- node');
+      expect(result.message).toContain('claude mcp remove agent-computer-use');
     });
   });
 

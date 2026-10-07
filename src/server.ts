@@ -62,13 +62,17 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
   },
   {
     name: 'task_journal_read',
-    description: 'Read all journal entries for a task or current session.',
+    description: 'Read journal entries for a task or current session.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: {
           type: 'string',
           description: 'Task identifier. If omitted, reads current session.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of recent entries to return (optional).',
         },
       },
     },
@@ -159,6 +163,10 @@ export function createProxyServer(
           name: appName,
           timeout_ms: timeoutMs,
         });
+
+        // Invalidate process/window cache since application state has changed or relaunched
+        enforcer?.clearWindowCache();
+
         audit.log({
           tool: name,
           target_bundle_id: bundleId,
@@ -217,7 +225,8 @@ export function createProxyServer(
     // --- Custom Tool 3: task_journal_read ---
     if (name === 'task_journal_read') {
       const taskId = args.task_id as string | undefined;
-      const entries = journal.read({ task_id: taskId });
+      const limit = typeof args.limit === 'number' ? args.limit : undefined;
+      const entries = journal.read({ task_id: taskId, limit });
       return {
         content: [{ type: 'text', text: JSON.stringify(entries, null, 2) }],
         structuredContent: { entries },
@@ -245,6 +254,7 @@ export function createProxyServer(
           tool: name,
           target_bundle_id: check.targetBundleId ?? null,
           status: check.code ?? 'REJECTED',
+          duration_ms: 0,
           details: {
             reason: check.reason,
             ...auditDetails,
@@ -267,8 +277,10 @@ export function createProxyServer(
         };
       }
 
-      // Execute on backend
+      // Execute on backend with duration measurement
+      const callStartTime = Date.now();
       let result: CallToolResult = await backend.callTool(name, args);
+      const durationMs = Date.now() - callStartTime;
 
       // Check if the backend reported a crash of the target application/window
       if (result.isError) {
@@ -276,6 +288,14 @@ export function createProxyServer(
 
         if (isAppCrashError(errorText)) {
           logger.warn(`Detected target application crash/termination in ${name}: ${errorText}`);
+
+          // Invalidate cache for the affected pid/window so stale entries are purged
+          if (typeof args.pid === 'number') {
+            enforcer.invalidatePid(args.pid);
+          }
+          if (typeof args.window_id === 'number') {
+            enforcer.invalidateWindow(args.window_id);
+          }
 
           // Check if autoRelaunch is enabled
           if (enforcer.getConfig().autoRelaunch && check.targetBundleId && recoveryManager) {
@@ -337,12 +357,13 @@ export function createProxyServer(
         }
       }
 
-      // Record in audit log
+      // Record in audit log with duration
       const auditDetails = prepareAuditDetails(name, args, enforcer.getConfig().logTypedText);
       audit.log({
         tool: name,
         target_bundle_id: check.targetBundleId ?? null,
         status: result.isError ? ((result.structuredContent as Record<string, unknown>)?.code as string ?? 'error') : 'ok',
+        duration_ms: durationMs,
         details: auditDetails,
       });
 
@@ -372,18 +393,22 @@ function extractErrorText(result: CallToolResult): string {
   return '';
 }
 
-function prepareAuditDetails(
+export function prepareAuditDetails(
   toolName: string,
   args: Record<string, unknown>,
   logTypedText: boolean
 ): Record<string, unknown> {
   const details = { ...args };
 
-  if (toolName === 'type_text' && !logTypedText) {
-    const rawText = typeof args.text === 'string' ? args.text : '';
-    delete details.text;
-    details.textLength = rawText.length;
-    details.masked = true;
+  if (toolName === 'type_text') {
+    if (!logTypedText) {
+      const rawText = typeof args.text === 'string' ? args.text : '';
+      delete details.text;
+      details.textLength = rawText.length;
+      details.masked = true;
+    } else {
+      details.masked = false;
+    }
   }
 
   return details;

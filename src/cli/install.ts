@@ -77,6 +77,25 @@ export function runInstall(options: InstallOptions): InstallResult {
     args: [serverPath],
   };
 
+  if (client === 'claude-code') {
+    return {
+      success: true,
+      client,
+      configPath,
+      serverEntry,
+      dryRun: true,
+      message: [
+        `For Claude Code, direct file modification is disabled to protect session state, projects, and credentials.`,
+        `Register 'agent-computer-use' using the official Claude Code CLI command:`,
+        ``,
+        `  claude mcp add agent-computer-use -- node "${serverPath}"`,
+        ``,
+        `To unregister later:`,
+        `  claude mcp remove agent-computer-use`,
+      ].join('\n'),
+    };
+  }
+
   if (!write) {
     // Dry-run mode
     const previewConfig = {

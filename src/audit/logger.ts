@@ -8,6 +8,7 @@ export interface AuditEntry {
   tool: string;
   target_bundle_id: string | null;
   status: 'ok' | string;
+  duration_ms?: number;
   details: Record<string, unknown>;
 }
 

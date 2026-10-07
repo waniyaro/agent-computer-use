@@ -9,15 +9,11 @@ export const DEFAULT_DENIED_APPS = [
   'com.agilebits.onepassword7',
   'com.bitwarden.desktop',
   'com.apple.keychainaccess',
+  'com.apple.Passwords',
   'com.apple.systempreferences',
   'com.apple.Terminal',
   'com.googlecode.iterm2',
-  '1Password',
-  'Bitwarden',
-  'Keychain',
-  'System Settings',
-  'Terminal',
-  'iTerm',
+  'com.apple.ScriptEditor2',
 ];
 
 export const PolicyConfigSchema = z.object({
@@ -28,6 +24,7 @@ export const PolicyConfigSchema = z.object({
   allowForeground: z.boolean().default(false),
   logTypedText: z.boolean().default(false),
   autoRelaunch: z.boolean().default(false),
+  allowAnyApp: z.boolean().default(false),
 });
 
 export function getConfigDir(): string {

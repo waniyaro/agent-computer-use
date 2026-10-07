@@ -28,6 +28,7 @@ audit.log*
 *.tmp
 *.temp
 STOP
+scratch/
 
 # OS metadata
 .DS_Store

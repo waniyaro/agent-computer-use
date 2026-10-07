@@ -306,4 +306,222 @@ describe('Security Policy & Audit Tests', () => {
     await server.close();
     await backend.stop();
   });
+
+  it('7. Защита от spoofing: проверка только по bundle ID, имя приложения не может обойти политику', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.apple.calculator'],
+      deniedApps: [],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+
+    // Злонамеренное приложение назвалось "Калькулятор", но его bundle_id другой
+    enforcer.updateWindowCache([
+      {
+        pid: 7777,
+        window_id: 8888,
+        app_name: 'Калькулятор',
+        bundle_id: 'com.malicious.fakecalc',
+      },
+    ]);
+
+    const result = await enforcer.enforce('click', { pid: 7777, window_id: 8888 });
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('APP_NOT_ALLOWED');
+    expect(result.targetBundleId).toBe('com.malicious.fakecalc');
+  });
+
+  it('8. Инвалидация кэша по PID и полная очистка', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.apple.calculator'],
+      deniedApps: [],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 1234,
+        window_id: 5678,
+        app_name: 'Calculator',
+        bundle_id: 'com.apple.calculator',
+      },
+    ]);
+
+    // До инвалидации - разрешено
+    const before = await enforcer.enforce('click', { pid: 1234 });
+    expect(before.allowed).toBe(true);
+
+    // Инвалидируем упавший pid
+    enforcer.invalidatePid(1234);
+
+    // После инвалидации повторный вызов без обновления окна дает APP_UNKNOWN
+    const after = await enforcer.enforce('click', { pid: 1234 });
+    expect(after.allowed).toBe(false);
+    expect(after.code).toBe('APP_UNKNOWN');
+  });
+
+  it('9. Отсутствие поддержки wildcard * в allowedApps (строгий Fail-Closed)', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['*'], // Строка "*" больше не интерпретируется как wildcard
+      deniedApps: [],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 4321,
+        window_id: 8765,
+        app_name: 'Safari',
+        bundle_id: 'com.apple.Safari',
+      },
+    ]);
+
+    // com.apple.Safari не совпадает буквально с '*'
+    const result = await enforcer.enforce('click', { pid: 4321, window_id: 8765 });
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('APP_NOT_ALLOWED');
+  });
+
+  it('10. Явный флаг allowAnyApp: true разрешает доступ, но denylist по-прежнему в приоритете', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: [],
+      deniedApps: ['com.apple.Terminal'],
+      allowAnyApp: true,
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 1111,
+        window_id: 2222,
+        app_name: 'Calculator',
+        bundle_id: 'com.apple.calculator',
+      },
+      {
+        pid: 3333,
+        window_id: 4444,
+        app_name: 'Terminal',
+        bundle_id: 'com.apple.Terminal',
+      },
+    ]);
+
+    // Калькулятор разрешен через allowAnyApp
+    const calcResult = await enforcer.enforce('click', { pid: 1111, window_id: 2222 });
+    expect(calcResult.allowed).toBe(true);
+
+    // Терминал заблокирован через denylist
+    const termResult = await enforcer.enforce('click', { pid: 3333, window_id: 4444 });
+    expect(termResult.allowed).toBe(false);
+    expect(termResult.code).toBe('APP_DENIED');
+  });
+
+  it('11. Защита от инъекций команд в PID (shell metacharacters и non-integer)', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.apple.calculator'],
+      deniedApps: [],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+
+    // Тестируем getBundleIdForPid напрямую с шелл-метасимволами
+    const maliciousPids = [
+      '1; rm -rf ~',
+      '1 && whoami',
+      '`cat /etc/passwd`',
+      -1,
+      0,
+      999999999, // out of range PID
+      NaN,
+      Infinity,
+      null as any,
+      undefined as any,
+      'calculator' as any,
+    ];
+
+    const { getBundleIdForPid } = await import('../src/policy/enforcer.js');
+
+    for (const badPid of maliciousPids) {
+      const res = getBundleIdForPid(badPid);
+      expect(res).toBeUndefined();
+    }
+
+    // Тестируем через enforce с невалидным PID
+    const result = await enforcer.enforce('click', {
+      pid: ('1; rm -rf /' as unknown as number),
+      element_token: 'tok-1',
+    });
+
+    // Должен сработать строгий Fail-Closed (APP_UNKNOWN)
+    expect(result.allowed).toBe(false);
+    expect(result.code).toBe('APP_UNKNOWN');
+  });
+
+  it('12. Проверка несоответствия pid и window_id (TARGET_MISMATCH)', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.apple.calculator'],
+      deniedApps: ['com.apple.Terminal'],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 100,
+        window_id: 1000,
+        app_name: 'Calculator',
+        bundle_id: 'com.apple.calculator',
+      },
+      {
+        pid: 200,
+        window_id: 2000,
+        app_name: 'Terminal',
+        bundle_id: 'com.apple.Terminal',
+      },
+    ]);
+
+    // Атака подменой: передаем разрешенный pid=100 (Калькулятор), но window_id=2000 (Терминал)
+    const spoofResult = await enforcer.enforce('click', {
+      pid: 100,
+      window_id: 2000,
+      element_token: 'tok-123',
+    });
+
+    expect(spoofResult.allowed).toBe(false);
+    expect(spoofResult.code).toBe('TARGET_MISMATCH');
+    expect(spoofResult.reason).toContain('Target mismatch: window_id 2000 belongs to PID 200');
+  });
+
+  it('13. Аварийный STOP работает динамически на лету без перезапуска сервера', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.apple.calculator'],
+      deniedApps: [],
+    });
+
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 100,
+        window_id: 1000,
+        app_name: 'Calculator',
+        bundle_id: 'com.apple.calculator',
+      },
+    ]);
+
+    // 1. В нормальном состоянии вызов разрешен
+    const okBefore = await enforcer.enforce('click', { pid: 100, window_id: 1000 });
+    expect(okBefore.allowed).toBe(true);
+
+    // 2. Создаем файл STOP на лету (имитация экстренной остановки оператором)
+    fs.writeFileSync(stopFilePath, 'HALT');
+
+    const blocked = await enforcer.enforce('click', { pid: 100, window_id: 1000 });
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.code).toBe('STOPPED');
+    expect(blocked.reason).toContain('kill-switch');
+
+    // 3. Удаляем файл STOP на лету — работа мгновенно возобновляется без рестарта
+    fs.unlinkSync(stopFilePath);
+
+    const okAfter = await enforcer.enforce('click', { pid: 100, window_id: 1000 });
+    expect(okAfter.allowed).toBe(true);
+  });
 });

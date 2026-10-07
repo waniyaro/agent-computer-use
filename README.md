@@ -2,7 +2,7 @@
 
 # 🖥️ /agent-computer-use
 
-**Enterprise-grade Safety, Policy Enforcement, and Crash Recovery Middleware for Desktop AI Agents on macOS**
+**Experimental Lightweight Safety, Policy Enforcement, and Crash Recovery Middleware for Desktop AI Agents on macOS**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2014+-black.svg?logo=apple)]()
@@ -18,9 +18,9 @@
 
 </div>
 
-**`agent-computer-use`** is an open-source, high-reliability [Model Context Protocol (MCP)](https://modelcontextprotocol.io) proxy server built on top of [Cua Driver](https://github.com/trycua/cua). 
+**`agent-computer-use`** is an open-source, experimental [Model Context Protocol (MCP)](https://modelcontextprotocol.io) proxy server built on top of [Cua Driver](https://github.com/trycua/cua). 
 
-While raw computer-use drivers provide the low-level capability to click and type, **`agent-computer-use` provides the missing enterprise safety layer**: strict per-application bundle ID access control, fail-closed enforcement, instant kill-switches, sanitized audit logging, crash recovery, and durable task journaling for autonomous agents.
+While raw computer-use drivers provide low-level capabilities to click and type, **`agent-computer-use` provides a dedicated security and reliability proxy layer**: strict per-application bundle ID access control, fail-closed enforcement, instant kill-switches, sanitized audit logging with execution timing, process cache invalidation, crash recovery, and durable task journaling for autonomous agents.
 
 ---
 
@@ -39,15 +39,15 @@ graph TD
     subgraph ACU ["agent-computer-use (Proxy Server)"]
         direction TB
         subgraph Safety ["Security & Observability Layer"]
-            Enforcer["<b>PolicyEnforcer</b><br/>• Fail-Closed Bundle Allowlist<br/>• Hardcoded Denylist Priority<br/>• Live STOP File Kill-Switch"]:::module
-            Audit["<b>AuditLogger</b><br/>• Masked Typed Text<br/>• Binary/Screenshot Stripping<br/>• JSONL 10MB Auto-Rotation"]:::module
+            Enforcer["<b>PolicyEnforcer</b><br/>• Fail-Closed Bundle Allowlist<br/>• Strict Bundle ID Verification<br/>• PID Cache Invalidation<br/>• Live STOP File Kill-Switch"]:::module
+            Audit["<b>AuditLogger</b><br/>• Masked Typed Text<br/>• Binary/Screenshot Stripping<br/>• Duration ms Tracking<br/>• JSONL 10MB Auto-Rotation"]:::module
             Journal["<b>JournalManager</b><br/>• Session Task Journaling<br/>• Context Loss Recovery"]:::module
         end
         Recovery["<b>AppRecoveryManager</b><br/>• ensure_app_running self-healing<br/>• autoRelaunch detection"]:::module
     end
 
     Driver["<b>Cua Driver (stdio daemon)</b><br/>macOS Accessibility (AXUIElement) · Screen Capture"]:::driver
-    Apps["<b>Target Desktop Applications</b><br/>Calculator · Browsers · Enterprise Apps"]:::app
+    Apps["<b>Target Desktop Applications</b><br/>Calculator · Browsers · Native Apps"]:::app
 
     Client <-->|"stdio (JSON-RPC)"| ACU
     Safety --> Recovery
@@ -61,25 +61,22 @@ graph TD
 
 | Capability | What It Does | Why It Matters |
 | :--- | :--- | :--- |
-| **🔒 Fail-Closed Security** | Blocks all GUI interactions unless an app is explicitly added to `allowedApps`. | Prevents rogue AI agents from wandering into arbitrary desktop windows. |
-| **⛔ Protected App Denylist** | Hard-blocks password managers (1Password, Bitwarden, Keychain), System Settings, and Terminals. | Denylist takes absolute priority even if wildcards (`*`) are configured. |
+| **🔒 Fail-Closed Security** | Blocks all GUI interactions unless an app's macOS Bundle ID is explicitly in `allowedApps`. | Prevents rogue AI agents from wandering into unauthorized desktop windows. |
+| **⛔ Protected App Denylist** | Hard-blocks password managers (1Password, Bitwarden, Keychain), System Settings, and Terminals by bundle ID. | Denylist takes priority. Process name spoofing is strictly prevented. |
 | **🛑 Instant Kill-Switch** | Creates `~/.config/agent-computer-use/STOP` to immediately freeze all actions. | Halts runaway agents on the fly without needing to kill IDE processes. |
-| **🤫 Private Audit Log** | Writes JSONL events with masked keystrokes (`logTypedText: false`) and stripped screenshots. | Full compliance and security audit trails without leaking secrets or filling disks. |
-| **🔄 Self-Healing Recovery** | Custom `ensure_app_running` tool detects closed or crashed windows and restarts them. | Agents recover automatically without throwing raw OS errors or getting stuck. |
-| **📝 Durable Task Journal** | Persistent JSONL journal (`task_journal_*`) per session. | Survives agent memory loss, context compaction, and IDE restarts. |
-| **⚡ Minimal Tool Profile** | Downsamples Cua Driver's 58 tools into 16 focused, reliable primitives. | Keeps agent prompt context small, prevents tool confusion, and improves LLM reasoning. |
+| **🤫 Private Audit Log** | Writes JSONL events with duration metrics, masked keystrokes (`logTypedText: false`), and stripped screenshots. | Full observability and security audit trails without leaking credentials. |
+| **🔄 Self-Healing Recovery** | Custom `ensure_app_running` tool detects closed or crashed windows and restarts them, invalidating stale PID caches. | Agents recover automatically without throwing raw OS errors or getting stuck. |
+| **📝 Durable Task Journal** | Persistent JSONL journal (`task_journal_*`) per session with pagination/limit support. | Survives agent memory loss, context compaction, and IDE restarts. |
+| **⚡ Minimal Tool Profile** | Filters Cua Driver's 58 tools into 16 focused, reliable primitives. | Keeps agent prompt context small, prevents tool confusion, and improves LLM reasoning. |
 
 ---
 
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- **OS:** macOS 13+ (Sonoma, Sequoia, or newer; Apple Silicon & Intel).
+- **OS:** macOS 14+ (Sonoma, Sequoia, or newer; Apple Silicon & Intel) as required by Cua Driver.
 - **Node.js:** v20+ (v22 LTS recommended).
-- **Cua Driver:** Installed via the official one-liner:
-  ```bash
-  /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
-  ```
+- **Cua Driver:** Installed following the [official Cua installation guide](https://github.com/trycua/cua). (Always inspect installation scripts before running locally).
 
 ### 2. Installation
 ```bash
@@ -112,6 +109,7 @@ The doctor verifies macOS version, Cua Driver binary, Accessibility & Screen Rec
 --- 6. Client Integrations ---
   [OK]   Antigravity IDE: Configured in ~/.gemini/config/mcp_config.json
   [OK]   Claude Code: Configured in ~/.claude.json
+  [OK]   Codex: Not installed (optional)
 ------------------------------------------------------
 Overall Status: [OK]
 ======================================================
@@ -152,19 +150,14 @@ Location: `~/.config/agent-computer-use/policy.json`
     "com.apple.keychainaccess",
     "com.apple.systempreferences",
     "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "1Password",
-    "Bitwarden",
-    "Keychain",
-    "System Settings",
-    "Terminal",
-    "iTerm"
+    "com.googlecode.iterm2"
   ],
   "maxActionsPerSession": 200,
   "toolProfile": "minimal",
   "allowForeground": false,
   "logTypedText": false,
-  "autoRelaunch": false
+  "autoRelaunch": false,
+  "allowAnyApp": false
 }
 ```
 
@@ -172,13 +165,30 @@ Location: `~/.config/agent-computer-use/policy.json`
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `allowedApps` | `string[]` | `[]` | Whitelist of application bundle IDs or names. When empty, **all** action tools are blocked (Fail-Closed). |
-| `deniedApps` | `string[]` | `[...]` | Blacklist of sensitive apps. Always evaluated before `allowedApps`. |
+| `allowedApps` | `string[]` | `[]` | Whitelist of application bundle IDs (e.g., `"com.apple.calculator"`). When empty, **all** action tools are blocked (Fail-Closed). Wildcards are not supported to prevent bypasses. |
+| `deniedApps` | `string[]` | `[...]` | Blacklist of sensitive apps by bundle ID. Always evaluated before `allowedApps`. |
 | `maxActionsPerSession`| `number` | `200` | Safety cap preventing infinite loops or hallucinated repetitive clicks. |
 | `toolProfile` | `"minimal" \| "full"` | `"minimal"` | `"minimal"` exposes 16 essential tools; `"full"` exposes all 58 backend tools. |
 | `allowForeground` | `boolean` | `false` | When `false`, blocks `delivery_mode: "foreground"` to prevent focus stealing. |
 | `logTypedText` | `boolean` | `false` | When `false`, masks input text in audit logs to protect credentials. |
 | `autoRelaunch` | `boolean` | `false` | Automatically restarts the target application when a crash is detected. |
+| `allowAnyApp` | `boolean` | `false` | Disables allowlist checks (Not recommended). Denylist is still enforced. |
+
+> [!IMPORTANT]
+> **GUI Security Boundary vs. Agent Host Environment:**  
+> The `deniedApps` list and Policy Enforcer strictly govern **GUI automation actions executed through this MCP proxy**. They prevent the agent from viewing, clicking, or typing into protected macOS GUI windows (such as Passwords, Keychain, System Settings, Script Editor, Terminal.app, or iTerm2).  
+> **This proxy does NOT sandbox the agent's host environment or other IDE tools.** If an agent running in an IDE (e.g. Antigravity, Claude Code, Cursor) has access to shell execution tools (`run_command`, `bash`, terminal tools), it executes commands directly on the operating system outside this proxy. Blocking `com.apple.Terminal` in `deniedApps` prevents the agent from manipulating the Terminal window via GUI clicks/keystrokes, but does not restrict background shell commands run by the agent through other MCP servers or IDE capabilities.
+
+#### Default Denied Applications:
+- `com.1password.1password` (1Password)
+- `com.agilebits.onepassword7` (1Password 7)
+- `com.bitwarden.desktop` (Bitwarden)
+- `com.apple.keychainaccess` (Keychain Access)
+- `com.apple.Passwords` (macOS Passwords app)
+- `com.apple.systempreferences` (macOS System Settings)
+- `com.apple.Terminal` (Terminal.app)
+- `com.googlecode.iterm2` (iTerm2)
+- `com.apple.ScriptEditor2` (Script Editor)
 
 ### Emergency Kill-Switch
 To instantly freeze all actions without restarting your IDE:
@@ -197,7 +207,7 @@ rm ~/.config/agent-computer-use/STOP
 In addition to proxying Cua Driver primitives (`click`, `type_text`, `scroll`, `get_window_state`), `agent-computer-use` introduces 4 high-level reliability tools:
 
 ### `ensure_app_running`
-Verifies whether an application process and window exist. If closed or crashed, launches it in the background, waits for window initialization, and updates process caches.
+Verifies whether an application process and window exist. If closed or crashed, launches it in the background, waits for window initialization, and invalidates stale process caches.
 ```json
 {
   "bundle_id": "com.apple.calculator",
@@ -215,10 +225,10 @@ Appends a milestone, observation, or status update to the session's JSONL journa
 ```
 
 ### `task_journal_read`
-Reads past checkpoints so an agent can resume trajectories after compaction or restart.
+Reads past checkpoints (supports optional `limit` or `task_id`; defaults to current session) so an agent can resume trajectories after compaction or restart.
 ```json
 {
-  "task_id": "session-20261007-152252-87a2df"
+  "limit": 20
 }
 ```
 
@@ -229,20 +239,22 @@ Lists all historical and active task journals with summary statistics.
 
 ## 🧪 Testing
 
-The test suite runs with Vitest and validates proxy resilience, policy enforcement, audit sanitization, and CLI commands:
+The test suite runs with Vitest and validates proxy resilience, policy enforcement, audit sanitization, task journaling, and CLI commands:
 
 ```bash
 npm test
 ```
 
 ```text
+ ✓ tests/audit.test.ts (5 tests)
  ✓ tests/cli.test.ts (9 tests)
- ✓ tests/policy.test.ts (6 tests)
+ ✓ tests/journal.test.ts (5 tests)
+ ✓ tests/policy.test.ts (10 tests)
  ✓ tests/proxy.test.ts (4 tests)
  ✓ tests/recovery.test.ts (4 tests)
 
- Test Files  4 passed (4)
-      Tests  23 passed (23)
+ Test Files  6 passed (6)
+      Tests  37 passed (37)
 ```
 
 ---

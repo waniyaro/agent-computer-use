@@ -8,6 +8,7 @@ import {
   getStopFilePath,
   loadPolicyConfig,
 } from '../policy/schema.js';
+import { getProxyIndexPath } from './install.js';
 
 export type CheckStatus = 'OK' | 'WARN' | 'FAIL';
 
@@ -122,8 +123,14 @@ export async function runDoctor(): Promise<DoctorReport> {
   } else {
     try {
       const cfg = loadPolicyConfig(policyPath);
-      policyMsg = `Valid: toolProfile='${cfg.toolProfile}', allowedApps=${cfg.allowedApps.length}, deniedApps=${cfg.deniedApps.length}`;
-      policyStatus = 'OK';
+      if (cfg.allowAnyApp === true) {
+        policyStatus = 'WARN';
+        policyMsg = `Valid, but allowAnyApp=true bypasses allowedApps whitelist (toolProfile='${cfg.toolProfile}', deniedApps=${cfg.deniedApps.length})`;
+        policyHint = `For strict isolation, set allowAnyApp: false and list explicit allowedApps.`;
+      } else {
+        policyMsg = `Valid: toolProfile='${cfg.toolProfile}', allowedApps=${cfg.allowedApps.length}, deniedApps=${cfg.deniedApps.length}`;
+        policyStatus = 'OK';
+      }
     } catch (err) {
       policyStatus = 'FAIL';
       policyMsg = err instanceof Error ? err.message : String(err);
@@ -171,28 +178,50 @@ export async function runDoctor(): Promise<DoctorReport> {
     },
   ];
 
-  for (const client of clients) {
+  const clientConfigs = clients.map((client) => {
     const existingPath = client.paths.find((p) => fs.existsSync(p));
-    let clientStatus: CheckStatus = 'WARN';
-    let clientMsg = '';
-    let clientHint: string | undefined;
-
+    let hasAcu = false;
+    let jsonValid = true;
     if (existingPath) {
       try {
         const raw = fs.readFileSync(existingPath, 'utf8');
         const json = JSON.parse(raw);
-        const hasAcu = json.mcpServers && json.mcpServers['agent-computer-use'];
-        if (hasAcu) {
-          clientStatus = 'OK';
-          clientMsg = `Configured in ${existingPath}`;
-        } else {
-          clientStatus = 'WARN';
-          clientMsg = `Found ${existingPath}, but 'agent-computer-use' is not configured`;
-          clientHint = `Run 'acu install --client ${client.id} --write'`;
-        }
+        hasAcu = Boolean(json.mcpServers && json.mcpServers['agent-computer-use']);
       } catch {
+        jsonValid = false;
+      }
+    }
+    return { client, existingPath, hasAcu, jsonValid };
+  });
+
+  const anyClientConfigured = clientConfigs.some((c) => c.hasAcu);
+
+  for (const { client, existingPath, hasAcu, jsonValid } of clientConfigs) {
+    let clientStatus: CheckStatus = 'OK';
+    let clientMsg = '';
+    let clientHint: string | undefined;
+
+    if (existingPath) {
+      if (!jsonValid) {
         clientStatus = 'WARN';
         clientMsg = `Found ${existingPath}, but JSON is invalid`;
+      } else if (hasAcu) {
+        clientStatus = 'OK';
+        clientMsg = `Configured in ${existingPath}`;
+      } else if (!anyClientConfigured) {
+        clientStatus = 'WARN';
+        clientMsg = `Found ${existingPath}, but 'agent-computer-use' is not configured`;
+        clientHint =
+          client.id === 'claude-code'
+            ? `Run: claude mcp add agent-computer-use -- node "${getProxyIndexPath()}"`
+            : `Run 'acu install --client ${client.id} --write'`;
+      } else {
+        clientStatus = 'OK';
+        clientMsg = `Detected (${existingPath}), not configured (optional)`;
+        clientHint =
+          client.id === 'claude-code'
+            ? `To enable in Claude Code, run: claude mcp add agent-computer-use -- node "${getProxyIndexPath()}"`
+            : `To enable, run 'acu install --client ${client.id} --write'`;
       }
     } else {
       clientStatus = 'OK';
