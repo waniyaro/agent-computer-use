@@ -1,0 +1,56 @@
+{
+  "name": "agent-computer-use",
+  "version": "1.0.0",
+  "description": "Safe, policy-governed MCP proxy over Cua Driver for desktop GUI automation on macOS",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "acu": "./dist/bin/acu.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build && npm test",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cua-driver",
+    "computer-use",
+    "macos",
+    "desktop-automation",
+    "ai-agent",
+    "safety-proxy",
+    "antigravity",
+    "claude-code"
+  ],
+  "author": "waniyaro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/waniyaro/agent-computer-use.git"
+  },
+  "bugs": {
+    "url": "https://github.com/waniyaro/agent-computer-use/issues"
+  },
+  "homepage": "https://github.com/waniyaro/agent-computer-use#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
