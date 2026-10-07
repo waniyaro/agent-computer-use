@@ -1,135 +1,144 @@
-# agent-computer-use
+<div align="center">
 
-> **Безопасный и устойчивый MCP-прокси для прямого управления GUI macOS через Cua Driver**
+# 🖥️ /agent-computer-use
+
+**Enterprise-grade Safety, Policy Enforcement, and Crash Recovery Middleware for Desktop AI Agents on macOS**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-lightgrey.svg)]()
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-blue.svg)]()
+[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2014+-black.svg?logo=apple)]()
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178C6.svg?logo=typescript&logoColor=white)]()
+[![MCP Version](https://img.shields.io/badge/MCP-1.32+-8A2BE2.svg)]()
+[![CI Status](https://github.com/waniyaro/agent-computer-use/actions/workflows/ci.yml/badge.svg)](https://github.com/waniyaro/agent-computer-use/actions/workflows/ci.yml)
 
-`agent-computer-use` — это специализированный MCP-сервер (Model Context Protocol), функционирующий в качестве прокси поверх [Cua Driver](https://github.com/trycua/cua). Он добавляет строгие политики безопасности (allowlist/denylist по Bundle ID), защиту от несанкционированного ввода, устойчивость к падениям приложений, маскирование конфиденциальных данных в аудите и долговечный журнал шагов задачи.
+<br/>
+
+[English](README.md) • [Русский](README.ru.md)
+
+<br/>
+
+</div>
+
+**`agent-computer-use`** is an open-source, high-reliability [Model Context Protocol (MCP)](https://modelcontextprotocol.io) proxy server built on top of [Cua Driver](https://github.com/trycua/cua). 
+
+While raw computer-use drivers provide the low-level capability to click and type, **`agent-computer-use` provides the missing enterprise safety layer**: strict per-application bundle ID access control, fail-closed enforcement, instant kill-switches, sanitized audit logging, crash recovery, and durable task journaling for autonomous agents.
 
 ---
 
-## Архитектура
+## 🏛️ Architecture
 
+```mermaid
+graph TD
+    classDef client fill:#1e293b,stroke:#3b82f6,stroke-width:2px,color:#f8fafc;
+    classDef proxy fill:#0f172a,stroke:#6366f1,stroke-width:2px,color:#f8fafc;
+    classDef module fill:#1e1b4b,stroke:#818cf8,stroke-width:1px,color:#e0e7ff;
+    classDef driver fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#ecfdf5;
+    classDef app fill:#450a0a,stroke:#ef4444,stroke-width:2px,color:#fef2f2;
+
+    Client["<b>AI Agent / MCP Client</b><br/>Antigravity IDE · Claude Code · Codex · Cursor"]:::client
+
+    subgraph ACU ["agent-computer-use (Proxy Server)"]
+        direction TB
+        subgraph Safety ["Security & Observability Layer"]
+            Enforcer["<b>PolicyEnforcer</b><br/>• Fail-Closed Bundle Allowlist<br/>• Hardcoded Denylist Priority<br/>• Live STOP File Kill-Switch"]:::module
+            Audit["<b>AuditLogger</b><br/>• Masked Typed Text<br/>• Binary/Screenshot Stripping<br/>• JSONL 10MB Auto-Rotation"]:::module
+            Journal["<b>JournalManager</b><br/>• Session Task Journaling<br/>• Context Loss Recovery"]:::module
+        end
+        Recovery["<b>AppRecoveryManager</b><br/>• ensure_app_running self-healing<br/>• autoRelaunch detection"]:::module
+    end
+
+    Driver["<b>Cua Driver (stdio daemon)</b><br/>macOS Accessibility (AXUIElement) · Screen Capture"]:::driver
+    Apps["<b>Target Desktop Applications</b><br/>Calculator · Browsers · Enterprise Apps"]:::app
+
+    Client <-->|"stdio (JSON-RPC)"| ACU
+    Safety --> Recovery
+    ACU <-->|"stdio (JSON-RPC)"| Driver
+    Driver <-->|"AXEvents (Background Delivery Mode)"| Apps
 ```
-+-----------------------------------------------------------------------------------+
-|                            MCP Client (IDE / Agent)                               |
-|                     (Antigravity, Claude Code, Codex, Cursor)                     |
-+-----------------------------------------------------------------------------------+
-                                        | (stdio JSON-RPC)
-                                        v
-+-----------------------------------------------------------------------------------+
-|                        agent-computer-use (Proxy Server)                          |
-|                                                                                   |
-|  +--------------------+  +--------------------+  +-----------------------------+  |
-|  |   PolicyEnforcer   |  |    AuditLogger     |  |       JournalManager        |  |
-|  | - Fail-Closed      |  | - JSONL Rotation   |  | - session_id                |  |
-|  | - Bundle ID Filter |  | - Mask Typed Text  |  | - task_journal_append/read  |  |
-|  | - Emergency STOP   |  |                    |  |                             |  |
-|  +--------------------+  +--------------------+  +-----------------------------+  |
-|                                                                                   |
-|  +-----------------------------------------------------------------------------+  |
-|  |                            AppRecoveryManager                               |  |
-|  |                   - ensure_app_running / autoRelaunch                       |  |
-|  +-----------------------------------------------------------------------------+  |
-+-----------------------------------------------------------------------------------+
-                                        | (stdio JSON-RPC)
-                                        v
-+-----------------------------------------------------------------------------------+
-|                             Cua Driver (0.34.0+)                                  |
-|               macOS Accessibility API (AXUIElement) + Direct Screen               |
-+-----------------------------------------------------------------------------------+
-                                        |
-                                        v
-+-----------------------------------------------------------------------------------+
-|                        Целевые приложения macOS (Calculator, etc.)                |
-+-----------------------------------------------------------------------------------+
-```
 
 ---
 
-## Ключевые возможности
+## ✨ Key Features
 
-1. **Строгие политики безопасности (Fail-Closed):**
-   - Блокировка доступа к неразрешенным окнам по macOS Bundle ID (`allowedApps`).
-   - Встроенный запрет (`deniedApps`) на взаимодействие с менеджерами паролей (1Password, Bitwarden, Keychain), системными настройками и терминалами.
-   - Лимит действий на сессию (`maxActionsPerSession`).
-   - Аварийный файловый выключатель (`~/.config/agent-computer-use/STOP`), моментально прерывающий все операции.
-2. **Аудит и конфиденциальность:**
-   - Полный аудит вызовов в `audit.log` (JSONL) с авто-ротацией при достижении 10 МБ.
-   - Маскирование набираемого текста (`logTypedText: false`) во избежание утечки чувствительных строк.
-3. **Восстановление и журналирование:**
-   - Отслеживание крашей целевых процессов (`APP_NOT_RUNNING`) и функция `ensure_app_running`.
-   - Встроенный Task Journal для сохранения контекста агента при сжатии контекстного окна.
-4. **Удобный CLI (`acu`):**
-   - `acu doctor` — диагностика окружения, прав macOS (Accessibility, Screen Recording) и конфигураций клиентов.
-   - `acu install` — безопасная регистрация в конфигах клиентов без перезаписи существующих серверов и с автоматическим бэкапом.
+| Capability | What It Does | Why It Matters |
+| :--- | :--- | :--- |
+| **🔒 Fail-Closed Security** | Blocks all GUI interactions unless an app is explicitly added to `allowedApps`. | Prevents rogue AI agents from wandering into arbitrary desktop windows. |
+| **⛔ Protected App Denylist** | Hard-blocks password managers (1Password, Bitwarden, Keychain), System Settings, and Terminals. | Denylist takes absolute priority even if wildcards (`*`) are configured. |
+| **🛑 Instant Kill-Switch** | Creates `~/.config/agent-computer-use/STOP` to immediately freeze all actions. | Halts runaway agents on the fly without needing to kill IDE processes. |
+| **🤫 Private Audit Log** | Writes JSONL events with masked keystrokes (`logTypedText: false`) and stripped screenshots. | Full compliance and security audit trails without leaking secrets or filling disks. |
+| **🔄 Self-Healing Recovery** | Custom `ensure_app_running` tool detects closed or crashed windows and restarts them. | Agents recover automatically without throwing raw OS errors or getting stuck. |
+| **📝 Durable Task Journal** | Persistent JSONL journal (`task_journal_*`) per session. | Survives agent memory loss, context compaction, and IDE restarts. |
+| **⚡ Minimal Tool Profile** | Downsamples Cua Driver's 58 tools into 16 focused, reliable primitives. | Keeps agent prompt context small, prevents tool confusion, and improves LLM reasoning. |
 
 ---
 
-## Быстрый старт
+## 🚀 Quick Start
 
-### 1. Требования
-- macOS 13+ (Apple Silicon или Intel).
-- Node.js 18+ (рекомендуется Node.js 22+).
-- Установленный [Cua Driver](https://github.com/trycua/cua):
+### 1. Prerequisites
+- **OS:** macOS 13+ (Sonoma, Sequoia, or newer; Apple Silicon & Intel).
+- **Node.js:** v20+ (v22 LTS recommended).
+- **Cua Driver:** Installed via the official one-liner:
   ```bash
   /bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"
   ```
 
-### 2. Сборка и установка
+### 2. Installation
 ```bash
-git clone https://github.com/your-username/agent-computer-use.git
+git clone https://github.com/waniyaro/agent-computer-use.git
 cd agent-computer-use
 npm install
 npm run build
 ```
 
-### 3. Диагностика системы (`acu doctor`)
+### 3. Run System Diagnostics (`acu doctor`)
 ```bash
-# Через npx или локальный бинарник
 node dist/bin/acu.js doctor
 ```
 
-Пример вывода:
-```
+The doctor verifies macOS version, Cua Driver binary, Accessibility & Screen Recording permissions, policy schema validity, and client integrations:
+```text
 ======================================================
            agent-computer-use Doctor Report           
 ======================================================
 --- 1. macOS Environment ---
-  [OK]   Operating System: macOS 26.6.2 (25G83) - arm64
+  [OK]   Operating System: macOS 26.6.2 (arm64)
 --- 2. Cua Driver ---
-  [OK]   Binary executable: /Users/username/.local/bin/cua-driver (cua-driver 0.34.0)
+  [OK]   Binary executable: ~/.local/bin/cua-driver (cua-driver 0.34.0)
 --- 3. macOS Permissions ---
-  [OK]   TCC Grants (Accessibility & Screen Recording): Accessibility: granted, Screen Recording: granted
+  [OK]   TCC Grants: Accessibility: granted, Screen Recording: granted
 --- 4. Policy Configuration ---
-  [OK]   policy.json validation: Valid: toolProfile='minimal', allowedApps=1, deniedApps=14
+  [OK]   policy.json validation: Valid (toolProfile='minimal', allowedApps=1)
 --- 5. Kill-Switch Status ---
   [OK]   Emergency STOP file: Inactive (normal operation)
 --- 6. Client Integrations ---
-  [OK]   Antigravity IDE: Configured in /Users/username/.gemini/config/mcp_config.json
+  [OK]   Antigravity IDE: Configured in ~/.gemini/config/mcp_config.json
+  [OK]   Claude Code: Configured in ~/.claude.json
 ------------------------------------------------------
 Overall Status: [OK]
 ======================================================
 ```
 
-### 4. Подключение к MCP-клиенту (`acu install`)
+### 4. Connect to Your MCP Client (`acu install`)
+
+Install into your AI IDE with safe dry-run preview and automatic timestamped backups:
+
 ```bash
-# Dry-run (только просмотр сгенерированного JSON)
+# Preview configuration (safe dry-run)
 node dist/bin/acu.js install --client antigravity --dry-run
 
-# Запись с автоматическим бэкапом существующего файла конфига
+# Write configuration (creates .bak copy and preserves all other MCP servers)
 node dist/bin/acu.js install --client antigravity --write
 ```
 
-Поддерживаемые клиенты: `antigravity`, `claude-code`, `codex`.
+Supported clients:
+- `antigravity` (Google Antigravity IDE)
+- `claude-code` (Anthropic Claude Code CLI)
+- `codex` (Codex CLI)
 
 ---
 
-## Конфигурация безопасности (`policy.json`)
+## 🛡️ Policy Configuration (`policy.json`)
 
-Файл настроек располагается по пути: `~/.config/agent-computer-use/policy.json`.
+Location: `~/.config/agent-computer-use/policy.json`
 
 ```json
 {
@@ -159,32 +168,36 @@ node dist/bin/acu.js install --client antigravity --write
 }
 ```
 
-### Параметры:
-- `allowedApps`: Список Bundle ID или названий приложений, с которыми разрешено взаимодействовать. Если список пуст, ни одно приложение не будет доступно (Fail-Closed).
-- `deniedApps`: Черный список критических приложений, блокируемых независимо от allowlist.
-- `maxActionsPerSession`: Максимальное количество интерактивных действий за одну сессию MCP-сервера (защита от зацикливания агента).
-- `toolProfile`:
-  - `"minimal"`: Экспонирует базовые инструменты (`get_window_state`, `list_windows`, `click`, `type_text`, `press_hotkey`, `scroll`, `ensure_app_running`, `task_journal_*`).
-  - `"full"`: Открывает расширенный набор инструментов Cua Driver (`drag_and_drop`, `swipe`, `hover` и т.д.).
-- `allowForeground`: Разрешает ли переводить приложения на передний план (`delivery_mode: "foreground"`).
-- `logTypedText`: Маскировать ли вводимый текст в `audit.log` (при `false` текст заменяется на `***`).
-- `autoRelaunch`: Автоматически перезапускать упавшее целевое приложение при сбое.
+### Configuration Reference
 
-### Аварийный выключатель (Kill-Switch)
-Для экстренной мгновенной блокировки всех действий агента создайте файл:
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `allowedApps` | `string[]` | `[]` | Whitelist of application bundle IDs or names. When empty, **all** action tools are blocked (Fail-Closed). |
+| `deniedApps` | `string[]` | `[...]` | Blacklist of sensitive apps. Always evaluated before `allowedApps`. |
+| `maxActionsPerSession`| `number` | `200` | Safety cap preventing infinite loops or hallucinated repetitive clicks. |
+| `toolProfile` | `"minimal" \| "full"` | `"minimal"` | `"minimal"` exposes 16 essential tools; `"full"` exposes all 58 backend tools. |
+| `allowForeground` | `boolean` | `false` | When `false`, blocks `delivery_mode: "foreground"` to prevent focus stealing. |
+| `logTypedText` | `boolean` | `false` | When `false`, masks input text in audit logs to protect credentials. |
+| `autoRelaunch` | `boolean` | `false` | Automatically restarts the target application when a crash is detected. |
+
+### Emergency Kill-Switch
+To instantly freeze all actions without restarting your IDE:
 ```bash
 touch ~/.config/agent-computer-use/STOP
 ```
-Пока файл существует, прокси будет немедленно отвечать ошибкой `KILL_SWITCH_ACTIVE` на любые вызовы инструментов взаимодействия.
+To resume:
+```bash
+rm ~/.config/agent-computer-use/STOP
+```
 
 ---
 
-## Собственные инструменты прокси
+## 🛠️ Custom Proxy Tools
 
-В дополнение к возможностям Cua Driver, прокси предоставляет расширенные инструменты:
+In addition to proxying Cua Driver primitives (`click`, `type_text`, `scroll`, `get_window_state`), `agent-computer-use` introduces 4 high-level reliability tools:
 
-### 1. `ensure_app_running`
-Проверяет запущен ли целевой процесс по его Bundle ID. Если процесс завершен, производит его запуск через `open -b <bundle_id>`.
+### `ensure_app_running`
+Verifies whether an application process and window exist. If closed or crashed, launches it in the background, waits for window initialization, and updates process caches.
 ```json
 {
   "bundle_id": "com.apple.calculator",
@@ -192,45 +205,55 @@ touch ~/.config/agent-computer-use/STOP
 }
 ```
 
-### 2. `task_journal_append`
-Записывает веху или результат шага в журнал задачи `~/.config/agent-computer-use/journal/<task_id>.jsonl`.
+### `task_journal_append`
+Appends a milestone, observation, or status update to the session's JSONL journal (`~/.config/agent-computer-use/journal/<task_id>.jsonl`).
 ```json
 {
-  "note": "Посчитан результат 17 * 23 = 391",
-  "status": "success",
-  "step_index": 2
+  "note": "Calculated 17 * 23 = 391",
+  "status": "completed"
 }
 ```
 
-### 3. `task_journal_read`
-Считывает последние записи журнала текущей сессии для восстановления контекста агента.
+### `task_journal_read`
+Reads past checkpoints so an agent can resume trajectories after compaction or restart.
 ```json
 {
-  "limit": 20
+  "task_id": "session-20261007-152252-87a2df"
 }
 ```
 
-### 4. `task_journal_list`
-Возвращает список всех сохраненных файлов журналов задач с размером и временем изменения.
+### `task_journal_list`
+Lists all historical and active task journals with summary statistics.
 
 ---
 
-## Тестирование
+## 🧪 Testing
 
-Проект покрыт всесторонними тестами с использованием Vitest:
+The test suite runs with Vitest and validates proxy resilience, policy enforcement, audit sanitization, and CLI commands:
+
 ```bash
 npm test
 ```
-Тесты проверяют:
-- Прозрачное проксирование и авто-восстановление процесса Cua Driver.
-- Контроль доступа `PolicyEnforcer` (Allowlist, Denylist, Unknown process, STOP-файл, лимит действий).
-- Маскирование текста в `AuditLogger`.
-- Сохранение и считывание Task Journal.
-- Функционирование CLI (`acu doctor`, `acu install --dry-run`, `acu install --write` с бэкапами).
+
+```text
+ ✓ tests/cli.test.ts (9 tests)
+ ✓ tests/policy.test.ts (6 tests)
+ ✓ tests/proxy.test.ts (4 tests)
+ ✓ tests/recovery.test.ts (4 tests)
+
+ Test Files  4 passed (4)
+      Tests  23 passed (23)
+```
 
 ---
 
-## Лицензия
+## 🤝 Contributing
 
-Распространяется под лицензией [MIT](LICENSE).
-Основано на драйвере автоматизации [Cua Driver](https://github.com/trycua/cua) от команды Cua.
+Contributions are warmly welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a pull request.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).  
+Underlying desktop automation powered by [Cua Driver](https://github.com/trycua/cua) (MIT License).
