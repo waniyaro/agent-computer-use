@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const VisualClickInputSchema = z
   .object({
     window_id: z.number().int({ message: 'window_id must be an integer' }),
-    pid: z.number().int({ message: 'pid must be an integer' }),
+    pid: z.number().int({ message: 'pid must be an integer' }).optional(),
     button: z.enum(['left', 'right', 'double']).default('left'),
     x_percent: z.number().min(0).max(1).optional(),
     y_percent: z.number().min(0).max(1).optional(),
@@ -33,15 +33,89 @@ export type VisualClickInput = z.infer<typeof VisualClickInputSchema>;
 
 export const ClipboardPasteInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
-  pid: z.number().int({ message: 'pid must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
   text: z.string({ message: 'text must be a string' }),
 });
 
 export type ClipboardPasteInput = z.infer<typeof ClipboardPasteInputSchema>;
 
+export const ClickInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  button: z.enum(['left', 'right', 'double']).default('left').optional(),
+  count: z.number().int().optional(),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+  debug_image_out: z.string().optional(),
+});
+
+export type ClickInput = z.infer<typeof ClickInputSchema>;
+
+export const DoubleClickInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type DoubleClickInput = z.infer<typeof DoubleClickInputSchema>;
+
+export const RightClickInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type RightClickInput = z.infer<typeof RightClickInputSchema>;
+
+export const TypeTextInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }).optional(),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  text: z.string({ message: 'text must be a string' }),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type TypeTextInput = z.infer<typeof TypeTextInputSchema>;
+
+export const PressKeyInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }).optional(),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  key: z.string().min(1, 'Key name cannot be empty'),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type PressKeyInput = z.infer<typeof PressKeyInputSchema>;
+
+export const HotkeyInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }).optional(),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  keys: z.array(z.string().min(1, 'Key name cannot be empty')).min(1, 'keys array must contain at least one key'),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type HotkeyInput = z.infer<typeof HotkeyInputSchema>;
+
+export const ScrollInputSchema = z.object({
+  window_id: z.number().int({ message: 'window_id must be an integer' }).optional(),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+  delta_x: z.number().optional(),
+  delta_y: z.number().optional(),
+  x: z.number().optional(),
+  y: z.number().optional(),
+  delivery_mode: z.enum(['foreground', 'background']).optional(),
+});
+
+export type ScrollInput = z.infer<typeof ScrollInputSchema>;
+
 export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('click'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
     x_pixel: z.number().optional(),
@@ -53,6 +127,8 @@ export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('double_click'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
     x_pixel: z.number().optional(),
@@ -63,6 +139,8 @@ export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('right_click'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
     x_pixel: z.number().optional(),
@@ -73,14 +151,20 @@ export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
   }),
   z.object({
     action: z.literal('paste'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     text: z.string({ message: 'text is required for paste action' }),
   }),
   z.object({
     action: z.literal('type'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     text: z.string({ message: 'text is required for type action' }),
   }),
   z.object({
     action: z.literal('hotkey'),
+    window_id: z.number().int().optional(),
+    pid: z.number().int().optional(),
     keys: z.array(z.string()).min(1, 'keys array must contain at least one key'),
   }),
   z.object({
@@ -91,19 +175,38 @@ export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
 
 export type ActionSequenceStep = z.infer<typeof ActionSequenceStepSchema>;
 
-export const ExecuteActionSequenceInputSchema = z.object({
-  window_id: z.number().int({ message: 'window_id must be an integer' }),
-  pid: z.number().int({ message: 'pid must be an integer' }),
-  delivery_mode: z.enum(['foreground', 'background']).optional(),
-  delay_between_ms: z.number().nonnegative().default(100),
-  steps: z.array(ActionSequenceStepSchema).min(1, 'steps must contain at least one step'),
-});
+export const ExecuteActionSequenceInputSchema = z
+  .object({
+    window_id: z.number().int({ message: 'window_id must be an integer' }).optional(),
+    pid: z.number().int({ message: 'pid must be an integer' }).optional(),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
+    delay_between_ms: z.number().nonnegative().default(100),
+    steps: z.array(ActionSequenceStepSchema).optional(),
+    actions: z.array(ActionSequenceStepSchema).optional(),
+  })
+  .refine(
+    (data) => Boolean((data.steps && data.steps.length > 0) || (data.actions && data.actions.length > 0)),
+    {
+      message: "execute_action_sequence requires either 'steps' or 'actions' with at least one step",
+      path: ['steps'],
+    }
+  )
+  .transform((data) => {
+    const rawSteps = data.steps ?? data.actions ?? [];
+    return {
+      window_id: data.window_id,
+      pid: data.pid,
+      delivery_mode: data.delivery_mode,
+      delay_between_ms: data.delay_between_ms,
+      steps: rawSteps,
+    };
+  });
 
 export type ExecuteActionSequenceInput = z.infer<typeof ExecuteActionSequenceInputSchema>;
 
 export const PressHotkeyInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
-  pid: z.number().int({ message: 'pid must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
   keys: z
     .array(z.string().min(1, 'Key name cannot be empty'))
     .min(1, { message: 'keys array must contain at least one key' }),
@@ -113,7 +216,7 @@ export type PressHotkeyInput = z.infer<typeof PressHotkeyInputSchema>;
 
 export const GetWindowScreenshotInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
-  pid: z.number().int({ message: 'pid must be an integer' }),
+  pid: z.number().int({ message: 'pid must be an integer' }).optional(),
   save_to_file: z.string().optional(),
   include_image: z.boolean().default(true).optional(),
 });

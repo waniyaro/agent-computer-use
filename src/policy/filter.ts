@@ -23,6 +23,7 @@ export const MINIMAL_TOOLS_SET: ReadonlySet<string> = new Set([
   'visual_click',
   'press_hotkey',
   'get_window_screenshot',
+  'zoom',
   // High-performance batching & clipboard:
   'execute_action_sequence',
   'clipboard_paste',

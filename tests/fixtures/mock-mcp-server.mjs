@@ -261,6 +261,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
+    if (args && (args.simulate_focus_error || args.window_id === 777) && args.delivery_mode === 'foreground') {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: 'exact target window did not become focused',
+          },
+        ],
+        structuredContent: {
+          error: 'exact target window did not become focused',
+        },
+      };
+    }
+
     return {
       content: [
         {

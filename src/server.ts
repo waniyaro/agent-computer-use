@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   ListToolsRequestSchema,
@@ -112,7 +113,7 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
       type: 'object',
       properties: {
         window_id: { type: 'number', description: 'Target window ID' },
-        pid: { type: 'number', description: 'Target process ID' },
+        pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         x_percent: {
           type: 'number',
           description: 'Normalized X coordinate (0.0..1.0) relative to window top-left',
@@ -140,7 +141,7 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           description: 'Delivery mode: foreground (default if allowed) or background (modal dialogs)',
         },
       },
-      required: ['window_id', 'pid'],
+      required: ['window_id'],
     },
   },
   {
@@ -151,10 +152,10 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
       type: 'object',
       properties: {
         window_id: { type: 'number', description: 'Target window ID' },
-        pid: { type: 'number', description: 'Target process ID' },
+        pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         text: { type: 'string', description: 'Text to copy to clipboard and paste' },
       },
-      required: ['window_id', 'pid', 'text'],
+      required: ['window_id', 'text'],
     },
   },
   {
@@ -164,8 +165,8 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        window_id: { type: 'number', description: 'Target window ID' },
-        pid: { type: 'number', description: 'Target process ID' },
+        window_id: { type: 'number', description: 'Target window ID (optional, inherited by steps if omitted in step)' },
+        pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         delivery_mode: {
           type: 'string',
           enum: ['foreground', 'background'],
@@ -184,6 +185,8 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
                 type: 'string',
                 enum: ['click', 'double_click', 'right_click', 'paste', 'hotkey', 'type', 'sleep'],
               },
+              window_id: { type: 'number', description: 'Optional target window ID for this step' },
+              pid: { type: 'number', description: 'Optional target process ID for this step' },
               x: { type: 'number', description: 'X coordinate' },
               y: { type: 'number', description: 'Y coordinate' },
               x_pixel: { type: 'number', description: 'Raw screenshot pixel X' },
@@ -202,10 +205,41 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
             },
             required: ['action'],
           },
-          description: 'Ordered sequence of actions to execute',
+          description: 'Ordered sequence of actions to execute (alias: actions)',
+        },
+        actions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              action: {
+                type: 'string',
+                enum: ['click', 'double_click', 'right_click', 'paste', 'hotkey', 'type', 'sleep'],
+              },
+              window_id: { type: 'number', description: 'Optional target window ID for this step' },
+              pid: { type: 'number', description: 'Optional target process ID for this step' },
+              x: { type: 'number', description: 'X coordinate' },
+              y: { type: 'number', description: 'Y coordinate' },
+              x_pixel: { type: 'number', description: 'Raw screenshot pixel X' },
+              y_pixel: { type: 'number', description: 'Raw screenshot pixel Y' },
+              x_percent: { type: 'number', description: 'Normalized X (0..1)' },
+              y_percent: { type: 'number', description: 'Normalized Y (0..1)' },
+              button: { type: 'string', enum: ['left', 'right', 'double'] },
+              delivery_mode: { type: 'string', enum: ['foreground', 'background'] },
+              text: { type: 'string', description: 'Text for paste or type action' },
+              keys: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Key combo for hotkey action',
+              },
+              ms: { type: 'number', description: 'Sleep duration in milliseconds' },
+            },
+            required: ['action'],
+          },
+          description: 'Alias for steps',
         },
       },
-      required: ['window_id', 'pid', 'steps'],
+      required: [],
     },
   },
   {
@@ -216,14 +250,14 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
       type: 'object',
       properties: {
         window_id: { type: 'number', description: 'Target window ID' },
-        pid: { type: 'number', description: 'Target process ID' },
+        pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         keys: {
           type: 'array',
           items: { type: 'string' },
           description: 'List of keys to press (e.g. ["Command", "s"] or ["Return"])',
         },
       },
-      required: ['window_id', 'pid', 'keys'],
+      required: ['window_id', 'keys'],
     },
   },
   {
@@ -234,7 +268,7 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
       type: 'object',
       properties: {
         window_id: { type: 'number', description: 'Target window ID' },
-        pid: { type: 'number', description: 'Target process ID' },
+        pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         save_to_file: {
           type: 'string',
           description: 'Optional path on disk to write the captured PNG directly',
@@ -244,10 +278,30 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           description: 'Whether to include base64 image in tool response (default: true). Set false with save_to_file to save network bandwidth.',
         },
       },
-      required: ['window_id', 'pid'],
+      required: ['window_id'],
     },
   },
 ];
+
+export function isWindowFocusError(errorText: string): boolean {
+  if (!errorText) return false;
+  return errorText.toLowerCase().includes('exact target window did not become focused');
+}
+
+export function isInsertKey(key: unknown): boolean {
+  if (typeof key !== 'string') return false;
+  const k = key.trim().toLowerCase();
+  return k === 'insert' || k === 'help';
+}
+
+export function sendMacInsertKeycode(): void {
+  try {
+    execFileSync('/usr/bin/osascript', ['-e', 'tell application "System Events" to key code 114']);
+    logger.info('Dispatched macOS key code 114 (Insert/Help) via System Events');
+  } catch (err) {
+    logger.warn('Failed to send key code 114 via AppleScript:', err);
+  }
+}
 
 export function createProxyServer(
   backend: CuaDriverBackend,
@@ -257,6 +311,37 @@ export function createProxyServer(
   recovery?: AppRecoveryManager
 ): Server {
   const recoveryManager = recovery ?? (enforcer ? new AppRecoveryManager(backend, enforcer) : null);
+  const localWindowCache = new Map<number, WindowInfo>();
+
+  async function resolvePidForWindow(windowId: number): Promise<number | undefined> {
+    const fromEnforcer = enforcer?.getWindowInfo(windowId);
+    if (fromEnforcer && typeof fromEnforcer.pid === 'number') {
+      return fromEnforcer.pid;
+    }
+    const fromLocal = localWindowCache.get(windowId);
+    if (fromLocal && typeof fromLocal.pid === 'number') {
+      return fromLocal.pid;
+    }
+
+    try {
+      const listRes = await backend.callTool('list_windows', {});
+      const sc = listRes.structuredContent as Record<string, unknown> | undefined;
+      if (sc && Array.isArray(sc.windows)) {
+        const windows = sc.windows as WindowInfo[];
+        enforcer?.updateWindowCache(windows);
+        for (const w of windows) {
+          localWindowCache.set(w.window_id, w);
+        }
+        const refreshed = enforcer?.getWindowInfo(windowId) || localWindowCache.get(windowId);
+        if (refreshed && typeof refreshed.pid === 'number') {
+          return refreshed.pid;
+        }
+      }
+    } catch (err) {
+      logger.warn(`Failed to refresh window cache when resolving pid for window ${windowId}:`, err);
+    }
+    return undefined;
+  }
 
   const server = new Server(
     {
@@ -275,8 +360,26 @@ export function createProxyServer(
     logger.debug('Handling tools/list request');
     const rawTools: Tool[] = await backend.listTools();
 
+    // Make pid optional in backend tools input schemas as well
+    const patchedRawTools = rawTools.map((t) => {
+      if (
+        ['click', 'double_click', 'right_click', 'type_text', 'press_key', 'hotkey', 'scroll', 'zoom'].includes(t.name)
+      ) {
+        if (t.inputSchema && Array.isArray((t.inputSchema as any).required)) {
+          return {
+            ...t,
+            inputSchema: {
+              ...t.inputSchema,
+              required: ((t.inputSchema as any).required as string[]).filter((r) => r !== 'pid'),
+            },
+          };
+        }
+      }
+      return t;
+    });
+
     // Combine backend tools and custom proxy tools
-    const combinedTools: Tool[] = [...rawTools, ...CUSTOM_PROXY_TOOL_DEFINITIONS];
+    const combinedTools: Tool[] = [...patchedRawTools, ...CUSTOM_PROXY_TOOL_DEFINITIONS];
 
     const filteredTools = enforcer
       ? filterToolsByProfile(combinedTools, enforcer.getConfig().toolProfile)
@@ -328,6 +431,7 @@ export function createProxyServer(
 
         // Invalidate process/window cache since application state has changed or relaunched
         enforcer?.clearWindowCache();
+        localWindowCache.clear();
 
         audit.log({
           tool: name,
@@ -402,6 +506,31 @@ export function createProxyServer(
         content: [{ type: 'text', text: JSON.stringify(summaries, null, 2) }],
         structuredContent: { tasks: summaries },
       };
+    }
+
+    // Auto-resolve PID from window cache if window_id is provided without pid
+    if (name !== 'list_windows' && typeof args.window_id === 'number' && (args.pid === undefined || args.pid === null)) {
+      const resolvedPid = await resolvePidForWindow(args.window_id);
+      if (resolvedPid === undefined) {
+        const errorMsg = `Window with window_id ${args.window_id} not found in window cache. Call list_windows first.`;
+        audit.log({
+          tool: name,
+          target_bundle_id: null,
+          status: 'WINDOW_NOT_FOUND',
+          duration_ms: 0,
+          details: { error: errorMsg, ...args },
+        });
+        return {
+          isError: true,
+          content: [{ type: 'text', text: errorMsg }],
+          structuredContent: {
+            code: 'WINDOW_NOT_FOUND',
+            message: errorMsg,
+            window_id: args.window_id,
+          },
+        };
+      }
+      args.pid = resolvedPid;
     }
 
     // --- Backend Tools with Policy Enforcer & Crash Recovery ---
@@ -572,6 +701,23 @@ export function createProxyServer(
         delete retryArgs.debug_image_out;
         backendResult = await backend.callTool('click', retryArgs);
       }
+
+      let fallbackDeliveryMode: string | undefined;
+
+      // Auto-fallback for window focus errors (macOS modals, popups, dropdowns)
+      if (backendResult.isError && isWindowFocusError(extractErrorText(backendResult))) {
+        const targetMode = deliveryMode === 'foreground' ? 'background' : 'foreground';
+        logger.warn(
+          `Focus error in visual_click (${extractErrorText(backendResult)}); retrying with delivery_mode='${targetMode}'...`
+        );
+        const retryArgs = { ...clickArgs, delivery_mode: targetMode };
+        const retryRes = await backend.callTool('click', retryArgs);
+        if (!retryRes.isError) {
+          backendResult = retryRes;
+          fallbackDeliveryMode = targetMode;
+        }
+      }
+
       const durationMs = Date.now() - callStartTime;
 
       audit.log({
@@ -582,6 +728,7 @@ export function createProxyServer(
         details: {
           ...args,
           coords: { normalized: norm, window_logical: windowLogical, screen_logical: screenLogical },
+          ...(fallbackDeliveryMode ? { delivery_mode_fallback: true, fallback_delivery_mode: fallbackDeliveryMode } : {}),
         },
       });
 
@@ -589,25 +736,34 @@ export function createProxyServer(
         return backendResult;
       }
 
+      const structuredResult: Record<string, unknown> = {
+        status: 'ok',
+        button,
+        coords: {
+          normalized: norm,
+          window_logical: windowLogical,
+          screen_logical: screenLogical,
+        },
+        window_bounds: bounds,
+        pid: input.pid,
+        window_id: input.window_id,
+      };
+
+      if (fallbackDeliveryMode) {
+        structuredResult.delivery_mode_fallback = true;
+        structuredResult.fallback_delivery_mode = fallbackDeliveryMode;
+      }
+
       return {
         content: [
           {
             type: 'text',
-            text: `Visual click [${button}] executed at window (${windowLogical.windowX}, ${windowLogical.windowY}) [${(norm.x_pct * 100).toFixed(1)}%, ${(norm.y_pct * 100).toFixed(1)}%]`,
+            text: `Visual click [${button}] executed at window (${windowLogical.windowX}, ${windowLogical.windowY}) [${(norm.x_pct * 100).toFixed(1)}%, ${(norm.y_pct * 100).toFixed(1)}%]${
+              fallbackDeliveryMode ? ` (fallback to delivery_mode='${fallbackDeliveryMode}')` : ''
+            }`,
           },
         ],
-        structuredContent: {
-          status: 'ok',
-          button,
-          coords: {
-            normalized: norm,
-            window_logical: windowLogical,
-            screen_logical: screenLogical,
-          },
-          window_bounds: bounds,
-          pid: input.pid,
-          window_id: input.window_id,
-        },
+        structuredContent: structuredResult,
       };
     }
 
@@ -638,12 +794,29 @@ export function createProxyServer(
       const callStartTime = Date.now();
 
       if (parsed.isSingleKey && parsed.singleKey) {
-        backendResult = await backend.callTool('press_key', {
-          pid: input.pid,
-          window_id: input.window_id,
-          key: parsed.singleKey,
-          delivery_mode: 'background',
-        });
+        if (isInsertKey(parsed.singleKey)) {
+          sendMacInsertKeycode();
+          backendResult = {
+            content: [{ type: 'text', text: 'Pressed Insert/Help key via macOS key code 114.' }],
+            structuredContent: { status: 'ok', key: 'Insert' },
+          };
+        } else {
+          backendResult = await backend.callTool('press_key', {
+            pid: input.pid,
+            window_id: input.window_id,
+            key: parsed.singleKey,
+            delivery_mode: 'background',
+          });
+          if (backendResult.isError && extractErrorText(backendResult).includes('same_pid_keyboard_ambiguity')) {
+            logger.warn('same_pid_keyboard_ambiguity in press_hotkey; retrying with delivery_mode=foreground...');
+            backendResult = await backend.callTool('press_key', {
+              pid: input.pid,
+              window_id: input.window_id,
+              key: parsed.singleKey,
+              delivery_mode: 'foreground',
+            });
+          }
+        }
       } else {
         backendResult = await backend.callTool('hotkey', {
           pid: input.pid,
@@ -651,6 +824,15 @@ export function createProxyServer(
           keys: parsed.chord ?? input.keys,
           delivery_mode: 'background',
         });
+        if (backendResult.isError && extractErrorText(backendResult).includes('same_pid_keyboard_ambiguity')) {
+          logger.warn('same_pid_keyboard_ambiguity in press_hotkey; retrying with delivery_mode=foreground...');
+          backendResult = await backend.callTool('hotkey', {
+            pid: input.pid,
+            window_id: input.window_id,
+            keys: parsed.chord ?? input.keys,
+            delivery_mode: 'foreground',
+          });
+        }
       }
       const durationMs = Date.now() - callStartTime;
 
@@ -906,20 +1088,31 @@ export function createProxyServer(
         input.delivery_mode ??
         (enforcer?.getConfig().allowForeground ? 'foreground' : 'background');
 
-      // Fetch snapshot dimensions once if normalized percentage coordinates are used
+      // Target window for snapshot dimensions if needed
+      let snapshotWindowId = input.window_id;
+      let snapshotPid = input.pid;
+
+      if (snapshotWindowId === undefined) {
+        for (const s of input.steps) {
+          if ('window_id' in s && typeof s.window_id === 'number') {
+            snapshotWindowId = s.window_id;
+            snapshotPid = typeof s.pid === 'number' ? s.pid : await resolvePidForWindow(s.window_id);
+            break;
+          }
+        }
+      }
+
       let shot_w = 0;
       let shot_h = 0;
       const needsSnapshot = input.steps.some(
-        (s) =>
-          (s.action === 'click' || s.action === 'double_click' || s.action === 'right_click') &&
-          (typeof s.x_percent === 'number' || typeof s.y_percent === 'number')
+        (s) => s.action === 'click' || s.action === 'double_click' || s.action === 'right_click'
       );
 
-      if (needsSnapshot) {
+      if (needsSnapshot && snapshotWindowId !== undefined && snapshotPid !== undefined) {
         try {
           const snap = await backend.callTool('get_window_state', {
-            pid: input.pid,
-            window_id: input.window_id,
+            pid: snapshotPid,
+            window_id: snapshotWindowId,
             include_accessibility_tree: false,
             include_screenshot: true,
           });
@@ -936,16 +1129,46 @@ export function createProxyServer(
         }
       }
 
-      const stepResults: Array<{ step: number; action: string; status: string; error?: string }> = [];
+      const stepResults: Array<{
+        step: number;
+        action: string;
+        status: string;
+        error?: string;
+        delivery_mode_fallback?: boolean;
+        fallback_delivery_mode?: string;
+      }> = [];
       let executedSteps = 0;
+      let sequenceFallbackOccurred = false;
 
       for (let i = 0; i < input.steps.length; i++) {
         const step = input.steps[i];
         let stepStatus = 'ok';
         let stepError: string | undefined;
+        let stepDeliveryFallback: string | undefined;
+
+        // Context inheritance: step inherits window_id and pid from batch level if omitted
+        const stepWindowId =
+          'window_id' in step && typeof step.window_id === 'number'
+            ? step.window_id
+            : input.window_id;
+
+        let stepPid =
+          'pid' in step && typeof step.pid === 'number'
+            ? step.pid
+            : 'window_id' in step && typeof step.window_id === 'number' && step.window_id !== input.window_id
+            ? undefined
+            : input.pid;
+
+        if (stepWindowId !== undefined && (stepPid === undefined || stepPid === null)) {
+          stepPid = await resolvePidForWindow(stepWindowId);
+        }
 
         try {
           if (step.action === 'click' || step.action === 'double_click' || step.action === 'right_click') {
+            if (stepWindowId === undefined || stepPid === undefined) {
+              throw new Error(`Step '${step.action}' requires window_id either on the step or at sequence level.`);
+            }
+
             let targetX: number;
             let targetY: number;
 
@@ -983,9 +1206,9 @@ export function createProxyServer(
             }
 
             const stepDelivery = step.delivery_mode ?? defaultDeliveryMode;
-            const res = await backend.callTool('click', {
-              pid: input.pid,
-              window_id: input.window_id,
+            let res = await backend.callTool('click', {
+              pid: stepPid,
+              window_id: stepWindowId,
               x: targetX,
               y: targetY,
               button,
@@ -993,15 +1216,40 @@ export function createProxyServer(
               delivery_mode: stepDelivery,
             });
 
+            // Focus error auto-fallback
+            if (res.isError && isWindowFocusError(extractErrorText(res))) {
+              const targetMode = stepDelivery === 'foreground' ? 'background' : 'foreground';
+              logger.warn(
+                `Focus error in execute_action_sequence step ${i + 1} (${extractErrorText(res)}); retrying with delivery_mode='${targetMode}'...`
+              );
+              const retryRes = await backend.callTool('click', {
+                pid: stepPid,
+                window_id: stepWindowId,
+                x: targetX,
+                y: targetY,
+                button,
+                count,
+                delivery_mode: targetMode,
+              });
+              if (!retryRes.isError) {
+                res = retryRes;
+                stepDeliveryFallback = targetMode;
+                sequenceFallbackOccurred = true;
+              }
+            }
+
             if (res.isError) {
               stepStatus = 'error';
               stepError = extractErrorText(res);
             }
           } else if (step.action === 'paste') {
+            if (stepWindowId === undefined || stepPid === undefined) {
+              throw new Error("Step 'paste' requires window_id either on the step or at sequence level.");
+            }
             setSystemClipboard(step.text);
             const res = await backend.callTool('hotkey', {
-              pid: input.pid,
-              window_id: input.window_id,
+              pid: stepPid,
+              window_id: stepWindowId,
               keys: ['cmd', 'v'],
               delivery_mode: 'background',
             });
@@ -1010,9 +1258,12 @@ export function createProxyServer(
               stepError = extractErrorText(res);
             }
           } else if (step.action === 'type') {
+            if (stepWindowId === undefined || stepPid === undefined) {
+              throw new Error("Step 'type' requires window_id either on the step or at sequence level.");
+            }
             const res = await backend.callTool('type_text', {
-              pid: input.pid,
-              window_id: input.window_id,
+              pid: stepPid,
+              window_id: stepWindowId,
               text: step.text,
               delivery_mode: 'background',
             });
@@ -1021,22 +1272,48 @@ export function createProxyServer(
               stepError = extractErrorText(res);
             }
           } else if (step.action === 'hotkey') {
-            const parsed = normalizeHotkey(step.keys);
+            if (stepWindowId === undefined || stepPid === undefined) {
+              throw new Error("Step 'hotkey' requires window_id either on the step or at sequence level.");
+            }
             let res: CallToolResult;
-            if (parsed.isSingleKey && parsed.singleKey) {
-              res = await backend.callTool('press_key', {
-                pid: input.pid,
-                window_id: input.window_id,
-                key: parsed.singleKey,
-                delivery_mode: 'background',
-              });
+            if (step.keys.some(isInsertKey)) {
+              sendMacInsertKeycode();
+              res = { content: [{ type: 'text', text: 'Sent Insert keycode 114 via System Events' }], isError: false };
             } else {
-              res = await backend.callTool('hotkey', {
-                pid: input.pid,
-                window_id: input.window_id,
-                keys: parsed.chord ?? step.keys,
-                delivery_mode: 'background',
-              });
+              const parsed = normalizeHotkey(step.keys);
+              if (parsed.isSingleKey && parsed.singleKey) {
+                res = await backend.callTool('press_key', {
+                  pid: stepPid,
+                  window_id: stepWindowId,
+                  key: parsed.singleKey,
+                  delivery_mode: 'background',
+                });
+                if (res.isError && extractErrorText(res).includes('same_pid_keyboard_ambiguity')) {
+                  logger.warn(`same_pid_keyboard_ambiguity in action sequence step ${i + 1}; retrying with foreground...`);
+                  res = await backend.callTool('press_key', {
+                    pid: stepPid,
+                    window_id: stepWindowId,
+                    key: parsed.singleKey,
+                    delivery_mode: 'foreground',
+                  });
+                }
+              } else {
+                res = await backend.callTool('hotkey', {
+                  pid: stepPid,
+                  window_id: stepWindowId,
+                  keys: parsed.chord ?? step.keys,
+                  delivery_mode: 'background',
+                });
+                if (res.isError && extractErrorText(res).includes('same_pid_keyboard_ambiguity')) {
+                  logger.warn(`same_pid_keyboard_ambiguity in action sequence step ${i + 1}; retrying with foreground...`);
+                  res = await backend.callTool('hotkey', {
+                    pid: stepPid,
+                    window_id: stepWindowId,
+                    keys: parsed.chord ?? step.keys,
+                    delivery_mode: 'foreground',
+                  });
+                }
+              }
             }
             if (res.isError) {
               stepStatus = 'error';
@@ -1050,7 +1327,26 @@ export function createProxyServer(
           stepError = err instanceof Error ? err.message : String(err);
         }
 
-        stepResults.push({ step: i + 1, action: step.action, status: stepStatus, error: stepError });
+        const stepResultItem: {
+          step: number;
+          action: string;
+          status: string;
+          error?: string;
+          delivery_mode_fallback?: boolean;
+          fallback_delivery_mode?: string;
+        } = {
+          step: i + 1,
+          action: step.action,
+          status: stepStatus,
+          error: stepError,
+        };
+
+        if (stepDeliveryFallback) {
+          stepResultItem.delivery_mode_fallback = true;
+          stepResultItem.fallback_delivery_mode = stepDeliveryFallback;
+        }
+
+        stepResults.push(stepResultItem);
         executedSteps++;
 
         if (stepStatus === 'error') {
@@ -1065,7 +1361,7 @@ export function createProxyServer(
 
       const durationMs = Date.now() - callStartTime;
       const allSuccess = stepResults.every((r) => r.status === 'ok');
-      const windowInfo = enforcer?.getWindowInfo(input.window_id);
+      const windowInfo = input.window_id !== undefined ? enforcer?.getWindowInfo(input.window_id) : undefined;
 
       audit.log({
         tool: name,
@@ -1099,7 +1395,9 @@ export function createProxyServer(
         content: [
           {
             type: 'text',
-            text: `Action sequence completed: ${executedSteps}/${input.steps.length} steps executed successfully in ${durationMs}ms.`,
+            text: `Action sequence completed: ${executedSteps}/${input.steps.length} steps executed successfully in ${durationMs}ms.${
+              sequenceFallbackOccurred ? ' (with delivery_mode fallback on focused window error)' : ''
+            }`,
           },
         ],
         structuredContent: {
@@ -1108,14 +1406,75 @@ export function createProxyServer(
           executed_steps: executedSteps,
           duration_ms: durationMs,
           step_results: stepResults,
+          ...(sequenceFallbackOccurred ? { delivery_mode_fallback: true } : {}),
         },
       };
     }
 
     if (enforcer) {
+      // Special interception for press_key with 'insert' / 'help'
+      if (name === 'press_key' && isInsertKey(args.key)) {
+        sendMacInsertKeycode();
+        return {
+          content: [{ type: 'text', text: `Key [${args.key}] sent successfully via macOS key code 114 (Help/Insert).` }],
+          structuredContent: { status: 'ok', key: args.key, window_id: args.window_id },
+        };
+      }
+
       // Execute on backend with duration measurement
       const callStartTime = Date.now();
       let result: CallToolResult = await backend.callTool(name, args);
+      let backendFallbackMode: string | undefined;
+
+      // Auto-fallback for same_pid_keyboard_ambiguity on hotkey/press_key
+      if (
+        (name === 'press_key' || name === 'hotkey') &&
+        result.isError &&
+        extractErrorText(result).includes('same_pid_keyboard_ambiguity')
+      ) {
+        logger.warn(`same_pid_keyboard_ambiguity in ${name}; retrying with delivery_mode='foreground'...`);
+        const retryArgs = { ...args, delivery_mode: 'foreground' };
+        const retryRes = await backend.callTool(name, retryArgs);
+        if (!retryRes.isError) {
+          result = retryRes;
+        }
+      }
+
+      // Auto-fallback for window focus errors on click actions
+      if (
+        (name === 'click' || name === 'double_click' || name === 'right_click') &&
+        result.isError &&
+        isWindowFocusError(extractErrorText(result))
+      ) {
+        const curMode = (args.delivery_mode as string) || 'foreground';
+        const targetMode = curMode === 'foreground' ? 'background' : 'foreground';
+        logger.warn(
+          `Focus error in ${name} (${extractErrorText(result)}); retrying with delivery_mode='${targetMode}'...`
+        );
+        const retryArgs = { ...args, delivery_mode: targetMode };
+        const retryRes = await backend.callTool(name, retryArgs);
+        if (!retryRes.isError) {
+          result = retryRes;
+          backendFallbackMode = targetMode;
+          if (result.structuredContent && typeof result.structuredContent === 'object') {
+            (result.structuredContent as Record<string, unknown>).delivery_mode_fallback = true;
+            (result.structuredContent as Record<string, unknown>).fallback_delivery_mode = targetMode;
+          } else {
+            result.structuredContent = {
+              status: 'ok',
+              delivery_mode_fallback: true,
+              fallback_delivery_mode: targetMode,
+            };
+          }
+          if (Array.isArray(result.content)) {
+            result.content.push({
+              type: 'text',
+              text: `Note: executed with fallback delivery_mode='${targetMode}' after focus error.`,
+            });
+          }
+        }
+      }
+
       const durationMs = Date.now() - callStartTime;
 
       // Check if the backend reported a crash of the target application/window
@@ -1131,6 +1490,7 @@ export function createProxyServer(
           }
           if (typeof args.window_id === 'number') {
             enforcer.invalidateWindow(args.window_id);
+            localWindowCache.delete(args.window_id);
           }
 
           // Check if autoRelaunch is enabled
@@ -1190,6 +1550,9 @@ export function createProxyServer(
         const sc = result.structuredContent as Record<string, unknown>;
         if (Array.isArray(sc.windows)) {
           enforcer.updateWindowCache(sc.windows as WindowInfo[]);
+          for (const w of sc.windows as WindowInfo[]) {
+            localWindowCache.set(w.window_id, w);
+          }
         }
       }
 
@@ -1200,14 +1563,49 @@ export function createProxyServer(
         target_bundle_id: check?.targetBundleId ?? null,
         status: result.isError ? ((result.structuredContent as Record<string, unknown>)?.code as string ?? 'error') : 'ok',
         duration_ms: durationMs,
-        details: auditDetails,
+        details: {
+          ...auditDetails,
+          ...(backendFallbackMode ? { delivery_mode_fallback: true, fallback_delivery_mode: backendFallbackMode } : {}),
+        },
       });
 
       return result;
     }
 
     // Direct execution without enforcer (fallback)
-    const result: CallToolResult = await backend.callTool(name, args);
+    let result: CallToolResult = await backend.callTool(name, args);
+    if (
+      (name === 'click' || name === 'double_click' || name === 'right_click') &&
+      result.isError &&
+      isWindowFocusError(extractErrorText(result))
+    ) {
+      const curMode = (args.delivery_mode as string) || 'foreground';
+      const targetMode = curMode === 'foreground' ? 'background' : 'foreground';
+      logger.warn(
+        `Focus error in ${name} (${extractErrorText(result)}); retrying with delivery_mode='${targetMode}'...`
+      );
+      const retryArgs = { ...args, delivery_mode: targetMode };
+      const retryRes = await backend.callTool(name, retryArgs);
+      if (!retryRes.isError) {
+        result = retryRes;
+        if (result.structuredContent && typeof result.structuredContent === 'object') {
+          (result.structuredContent as Record<string, unknown>).delivery_mode_fallback = true;
+          (result.structuredContent as Record<string, unknown>).fallback_delivery_mode = targetMode;
+        } else {
+          result.structuredContent = {
+            status: 'ok',
+            delivery_mode_fallback: true,
+            fallback_delivery_mode: targetMode,
+          };
+        }
+        if (Array.isArray(result.content)) {
+          result.content.push({
+            type: 'text',
+            text: `Note: executed with fallback delivery_mode='${targetMode}' after focus error.`,
+          });
+        }
+      }
+    }
     return result;
   });
 
