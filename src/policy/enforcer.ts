@@ -52,6 +52,7 @@ export const INSPECTION_TOOLS: ReadonlySet<string> = new Set([
   'check_permissions',
   'health_report',
   'get_config',
+  'wait_for_window',
 ]);
 
 export class PolicyEnforcer {

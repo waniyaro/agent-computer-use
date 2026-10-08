@@ -185,6 +185,8 @@ export const ExecuteActionSequenceInputSchema = z
     pid: z.number().int({ message: 'pid must be an integer' }).optional(),
     delivery_mode: z.enum(['foreground', 'background']).optional(),
     delay_between_ms: z.number().nonnegative().default(100),
+    stop_on_error: z.boolean().default(true).optional(),
+    stop_on_new_window: z.boolean().default(false).optional(),
     steps: z.array(ActionSequenceStepSchema).optional(),
     actions: z.array(ActionSequenceStepSchema).optional(),
   })
@@ -202,6 +204,8 @@ export const ExecuteActionSequenceInputSchema = z
       pid: data.pid,
       delivery_mode: data.delivery_mode,
       delay_between_ms: data.delay_between_ms,
+      stop_on_error: data.stop_on_error ?? true,
+      stop_on_new_window: data.stop_on_new_window ?? false,
       steps: rawSteps,
     };
   });
@@ -223,9 +227,23 @@ export const GetWindowScreenshotInputSchema = z.object({
   pid: z.number().int({ message: 'pid must be an integer' }).optional(),
   save_to_file: z.string().optional(),
   include_image: z.boolean().default(true).optional(),
+  max_width: z.number().positive().default(1440).optional(),
+  format: z.enum(['jpeg', 'png']).default('jpeg').optional(),
+  quality: z.number().min(1).max(100).default(80).optional(),
 });
 
 export type GetWindowScreenshotInput = z.infer<typeof GetWindowScreenshotInputSchema>;
+
+export const WaitForWindowInputSchema = z.object({
+  title: z.string().optional(),
+  bundle_id: z.string().optional(),
+  window_id: z.number().int().optional(),
+  state: z.enum(['opened', 'closed']).default('opened'),
+  timeout_ms: z.number().positive().max(30000).default(5000),
+  poll_interval_ms: z.number().positive().max(2000).default(150),
+});
+
+export type WaitForWindowInput = z.infer<typeof WaitForWindowInputSchema>;
 
 const MODIFIER_NAMES: ReadonlySet<string> = new Set([
   'cmd',

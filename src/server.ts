@@ -30,9 +30,11 @@ import {
   GetWindowScreenshotInputSchema,
   ClipboardPasteInputSchema,
   ExecuteActionSequenceInputSchema,
+  WaitForWindowInputSchema,
   normalizeHotkey,
 } from './engine/schemas.js';
 import { setSystemClipboard } from './engine/clipboard.js';
+import { optimizeScreenshot } from './engine/image-optimizer.js';
 
 export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
   {
@@ -181,6 +183,14 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           type: 'number',
           description: 'Delay between consecutive actions in milliseconds (default: 100ms)',
         },
+        stop_on_error: {
+          type: 'boolean',
+          description: 'Whether to halt execution immediately if any step fails (default: true)',
+        },
+        stop_on_new_window: {
+          type: 'boolean',
+          description: 'Whether to pause and return early if a new modal/alert window appears during execution (default: false)',
+        },
         steps: {
           type: 'array',
           items: {
@@ -282,8 +292,41 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
           type: 'boolean',
           description: 'Whether to include base64 image in tool response (default: true). Set false with save_to_file to save network bandwidth.',
         },
+        max_width: {
+          type: 'number',
+          description: 'Maximum image width in pixels for fast, token-efficient vision (default: 1440). Set 0 for unscaled.',
+        },
+        format: {
+          type: 'string',
+          enum: ['jpeg', 'png'],
+          description: 'Image format: "jpeg" for 80% smaller payloads and 4x faster vision (default: jpeg), or "png" for lossless.',
+        },
+        quality: {
+          type: 'number',
+          description: 'JPEG compression quality between 1 and 100 (default: 80). Ignored for PNG.',
+        },
       },
       required: ['window_id'],
+    },
+  },
+  {
+    name: 'wait_for_window',
+    description:
+      'Poll system for a window matching criteria (title, bundle_id, window_id) to open or close, avoiding blind sleep roundtrips.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Window title substring (case-insensitive) to wait for' },
+        bundle_id: { type: 'string', description: 'Application bundle identifier to wait for' },
+        window_id: { type: 'number', description: 'Exact window ID to wait for' },
+        state: {
+          type: 'string',
+          enum: ['opened', 'closed'],
+          description: 'Wait for window to appear ("opened") or disappear ("closed"). Default: opened',
+        },
+        timeout_ms: { type: 'number', description: 'Maximum time to wait in ms (default: 5000, max: 30000)' },
+        poll_interval_ms: { type: 'number', description: 'Polling interval in ms (default: 150)' },
+      },
     },
   },
 ];
@@ -324,6 +367,7 @@ export function createProxyServer(
 ): Server {
   const recoveryManager = recovery ?? (enforcer ? new AppRecoveryManager(backend, enforcer) : null);
   const localWindowCache = new Map<number, WindowInfo>();
+  const lastWindowDownscale = new Map<number, number>();
 
   async function resolvePidForWindow(windowId: number): Promise<number | undefined> {
     const fromEnforcer = enforcer?.getWindowInfo(windowId);
@@ -661,12 +705,13 @@ export function createProxyServer(
       }
 
       // Cua Driver reverses Retina and window downscale from raw screenshot pixel coordinates
+      const downscaleRatio = lastWindowDownscale.get(input.window_id) ?? 1.0;
       let cuaX: number;
       let cuaY: number;
 
       if (typeof input.x_pixel === 'number' && typeof input.y_pixel === 'number') {
-        cuaX = Math.round(input.x_pixel);
-        cuaY = Math.round(input.y_pixel);
+        cuaX = Math.round(input.x_pixel * downscaleRatio);
+        cuaY = Math.round(input.y_pixel * downscaleRatio);
       } else if (shot_w > 0 && shot_h > 0) {
         cuaX = Math.round(norm.x_pct * shot_w);
         cuaY = Math.round(norm.y_pct * shot_h);
@@ -948,6 +993,15 @@ export function createProxyServer(
           ? Number((width_px / logical_width).toFixed(2))
           : 2.0;
 
+      // Optimize image (downsample + convert to JPEG) using native macOS sips
+      const optResult = optimizeScreenshot(buffer, {
+        maxWidth: input.max_width ?? 1440,
+        format: input.format ?? 'jpeg',
+        quality: input.quality ?? 80,
+      });
+
+      lastWindowDownscale.set(input.window_id, optResult.downscaleRatio);
+
       let savedToFile: string | undefined;
       if (input.save_to_file) {
         try {
@@ -955,7 +1009,7 @@ export function createProxyServer(
           if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
           }
-          fs.writeFileSync(input.save_to_file, buffer);
+          fs.writeFileSync(input.save_to_file, optResult.buffer);
           savedToFile = input.save_to_file;
         } catch (err) {
           logger.error('Failed to save screenshot to file:', err);
@@ -963,8 +1017,12 @@ export function createProxyServer(
       }
 
       const metadata: Record<string, unknown> = {
-        width_px,
-        height_px,
+        width_px: optResult.originalWidth,
+        height_px: optResult.originalHeight,
+        image_width_px: optResult.width,
+        image_height_px: optResult.height,
+        downscale_ratio: optResult.downscaleRatio,
+        format: optResult.mimeType,
         logical_width,
         logical_height,
         scale_factor,
@@ -986,11 +1044,15 @@ export function createProxyServer(
       const contentList: Array<{ type: string; [key: string]: unknown }> = [];
       const includeImage = input.include_image !== false;
       if (includeImage) {
-        contentList.push(imageItem as { type: string; [key: string]: unknown });
+        contentList.push({
+          type: 'image',
+          data: optResult.base64,
+          mimeType: optResult.mimeType,
+        });
       }
       contentList.push({
         type: 'text',
-        text: `Window screenshot captured${savedToFile ? ` and saved to ${savedToFile}` : ''}: ${width_px}x${height_px} px, logical: ${logical_width}x${logical_height}, scale: ${scale_factor}x`,
+        text: `Window screenshot captured (${optResult.mimeType}${optResult.downscaleRatio > 1 ? `, downscaled ${optResult.downscaleRatio}x` : ''}${savedToFile ? `, saved to ${savedToFile}` : ''}): ${optResult.width}x${optResult.height} px (original: ${optResult.originalWidth}x${optResult.originalHeight} px), logical: ${logical_width}x${logical_height}, scale: ${scale_factor}x`,
       });
 
       return {
@@ -1176,6 +1238,20 @@ export function createProxyServer(
       let executedSteps = 0;
       let sequenceFallbackOccurred = false;
 
+      let initialWindowIds: Set<number> | undefined;
+      if (input.stop_on_new_window) {
+        try {
+          const listRes = await backend.callTool('list_windows', {});
+          const wins = ((listRes.structuredContent as any)?.windows as Array<{ window_id: number }>) || [];
+          initialWindowIds = new Set(wins.map((w) => w.window_id));
+        } catch {
+          // ignore
+        }
+      }
+
+      let stoppedEarlyDueToNewWindow = false;
+      let newWindowDetails: Record<string, unknown> | undefined;
+
       for (let i = 0; i < input.steps.length; i++) {
         const step = input.steps[i];
         let stepStatus = 'ok';
@@ -1199,21 +1275,39 @@ export function createProxyServer(
           stepPid = await resolvePidForWindow(stepWindowId);
         }
 
+        // Safety checkpoint: check if unexpected modal or alert appeared
+        if (i > 0 && initialWindowIds && input.stop_on_new_window) {
+          try {
+            const listRes = await backend.callTool('list_windows', {});
+            const wins = ((listRes.structuredContent as any)?.windows as Array<Record<string, unknown>>) || [];
+            const newWin = wins.find((w) => typeof w.window_id === 'number' && !initialWindowIds.has(w.window_id as number));
+            if (newWin) {
+              logger.info(`New window appeared during action sequence (${newWin.window_id}: "${newWin.title}"); pausing sequence for safety.`);
+              stoppedEarlyDueToNewWindow = true;
+              newWindowDetails = newWin;
+              break;
+            }
+          } catch {
+            // ignore
+          }
+        }
+
         try {
           if (step.action === 'click' || step.action === 'double_click' || step.action === 'right_click') {
             if (stepWindowId === undefined || stepPid === undefined) {
               throw new Error(`Step '${step.action}' requires window_id either on the step or at sequence level.`);
             }
 
+            const stepDownscale = (stepWindowId !== undefined ? lastWindowDownscale.get(stepWindowId) : undefined) ?? 1.0;
             let targetX: number;
             let targetY: number;
 
             if (typeof step.x_pixel === 'number' && typeof step.y_pixel === 'number') {
-              targetX = Math.round(step.x_pixel);
-              targetY = Math.round(step.y_pixel);
+              targetX = Math.round(step.x_pixel * stepDownscale);
+              targetY = Math.round(step.y_pixel * stepDownscale);
             } else if (typeof step.x === 'number' && typeof step.y === 'number') {
-              targetX = Math.round(step.x);
-              targetY = Math.round(step.y);
+              targetX = Math.round(step.x * stepDownscale);
+              targetY = Math.round(step.y * stepDownscale);
             } else if (
               typeof step.x_percent === 'number' &&
               typeof step.y_percent === 'number' &&
@@ -1430,7 +1524,7 @@ export function createProxyServer(
         stepResults.push(stepResultItem);
         executedSteps++;
 
-        if (stepStatus === 'error') {
+        if (stepStatus === 'error' && input.stop_on_error !== false) {
           break; // Stop sequence on error
         }
 
@@ -1451,6 +1545,27 @@ export function createProxyServer(
         duration_ms: durationMs,
         details: { total_steps: input.steps.length, executed_steps: executedSteps, step_results: stepResults },
       });
+
+      if (stoppedEarlyDueToNewWindow) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Action sequence paused at step ${executedSteps}/${input.steps.length}: a new window appeared (${
+                (newWindowDetails as any)?.title || (newWindowDetails as any)?.window_id || 'unknown'
+              }). Inspect window state before proceeding.`,
+            },
+          ],
+          structuredContent: {
+            status: 'paused_new_window',
+            new_window: newWindowDetails,
+            total_steps: input.steps.length,
+            executed_steps: executedSteps,
+            duration_ms: durationMs,
+            step_results: stepResults,
+          },
+        };
+      }
 
       if (!allSuccess) {
         return {
@@ -1492,19 +1607,123 @@ export function createProxyServer(
       };
     }
 
+    // --- Custom Tool: wait_for_window ---
+    if (name === 'wait_for_window') {
+      const parseResult = WaitForWindowInputSchema.safeParse(args);
+      if (!parseResult.success) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Invalid arguments for wait_for_window: ${parseResult.error.message}` }],
+        };
+      }
+      const { title, bundle_id, window_id } = parseResult.data;
+      const targetState = parseResult.data.state ?? 'opened';
+      const timeoutMs = parseResult.data.timeout_ms ?? 5000;
+      const pollIntervalMs = parseResult.data.poll_interval_ms ?? 150;
+      const callStartTime = Date.now();
+      let matchedWindow: Record<string, unknown> | undefined;
+
+      while (Date.now() - callStartTime < timeoutMs) {
+        try {
+          const listRes = await backend.callTool('list_windows', {});
+          const wins = ((listRes.structuredContent as any)?.windows as Array<Record<string, unknown>>) || [];
+
+          const match = wins.find((w) => {
+            if (window_id !== undefined && w.window_id !== window_id) return false;
+            if (bundle_id !== undefined && w.bundle_id !== bundle_id) return false;
+            if (title !== undefined) {
+              const winTitle = String(w.title || '').toLowerCase();
+              if (!winTitle.includes(title.toLowerCase())) return false;
+            }
+            return true;
+          });
+
+          if (targetState === 'opened' && match) {
+            matchedWindow = match;
+            break;
+          }
+          if (targetState === 'closed' && !match) {
+            break;
+          }
+        } catch {
+          // ignore transient poll error
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+
+      const durationMs = Date.now() - callStartTime;
+      const success = targetState === 'opened' ? Boolean(matchedWindow) : !matchedWindow;
+
+      audit.log({
+        tool: name,
+        target_bundle_id: bundle_id ?? (matchedWindow?.bundle_id as string | undefined) ?? null,
+        status: success ? 'ok' : 'timeout',
+        duration_ms: durationMs,
+        details: { state: targetState, criteria: { title, bundle_id, window_id }, matched_window: matchedWindow },
+      });
+
+      if (!success) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text',
+              text: `wait_for_window timed out after ${durationMs}ms waiting for window (state=${targetState}, title=${title ?? 'any'}, bundle_id=${bundle_id ?? 'any'}, window_id=${window_id ?? 'any'}).`,
+            },
+          ],
+          structuredContent: {
+            status: 'timeout',
+            elapsed_ms: durationMs,
+            state: targetState,
+            criteria: { title, bundle_id, window_id },
+          },
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Window condition met in ${durationMs}ms (state=${targetState}${matchedWindow ? `, title="${matchedWindow.title}", window_id=${matchedWindow.window_id}` : ''}).`,
+          },
+        ],
+        structuredContent: {
+          status: 'ok',
+          elapsed_ms: durationMs,
+          state: targetState,
+          window: matchedWindow,
+        },
+      };
+    }
+
     if (enforcer) {
+      // Scale zoom coordinates if downscaled
+      let callArgs = args;
+      if (name === 'zoom' && typeof args.window_id === 'number') {
+        const ratio = lastWindowDownscale.get(args.window_id) ?? 1.0;
+        if (ratio !== 1.0) {
+          callArgs = {
+            ...args,
+            x1: typeof args.x1 === 'number' ? Math.round(args.x1 * ratio) : args.x1,
+            y1: typeof args.y1 === 'number' ? Math.round(args.y1 * ratio) : args.y1,
+            x2: typeof args.x2 === 'number' ? Math.round(args.x2 * ratio) : args.x2,
+            y2: typeof args.y2 === 'number' ? Math.round(args.y2 * ratio) : args.y2,
+          };
+        }
+      }
+
       // Special interception for press_key with 'insert' / 'help'
-      if (name === 'press_key' && isInsertKey(args.key)) {
+      if (name === 'press_key' && isInsertKey(callArgs.key)) {
         sendMacInsertKeycode();
         return {
-          content: [{ type: 'text', text: `Key [${args.key}] sent successfully via macOS key code 114 (Help/Insert).` }],
-          structuredContent: { status: 'ok', key: args.key, window_id: args.window_id },
+          content: [{ type: 'text', text: `Key [${callArgs.key}] sent successfully via macOS key code 114 (Help/Insert).` }],
+          structuredContent: { status: 'ok', key: callArgs.key, window_id: callArgs.window_id },
         };
       }
 
       // Execute on backend with duration measurement
       const callStartTime = Date.now();
-      let result: CallToolResult = await backend.callTool(name, args);
+      let result: CallToolResult = await backend.callTool(name, callArgs);
       let backendFallbackMode: string | undefined;
 
       // Auto-fallback for focus/ambiguity errors on keyboard tools
@@ -1654,7 +1873,20 @@ export function createProxyServer(
     }
 
     // Direct execution without enforcer (fallback)
-    let result: CallToolResult = await backend.callTool(name, args);
+    let directArgs = args;
+    if (name === 'zoom' && typeof args.window_id === 'number') {
+      const ratio = lastWindowDownscale.get(args.window_id) ?? 1.0;
+      if (ratio !== 1.0) {
+        directArgs = {
+          ...args,
+          x1: typeof args.x1 === 'number' ? Math.round(args.x1 * ratio) : args.x1,
+          y1: typeof args.y1 === 'number' ? Math.round(args.y1 * ratio) : args.y1,
+          x2: typeof args.x2 === 'number' ? Math.round(args.x2 * ratio) : args.x2,
+          y2: typeof args.y2 === 'number' ? Math.round(args.y2 * ratio) : args.y2,
+        };
+      }
+    }
+    let result: CallToolResult = await backend.callTool(name, directArgs);
     if (
       (name === 'click' || name === 'double_click' || name === 'right_click') &&
       result.isError &&

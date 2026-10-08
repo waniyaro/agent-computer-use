@@ -24,9 +24,10 @@ export const MINIMAL_TOOLS_SET: ReadonlySet<string> = new Set([
   'press_hotkey',
   'get_window_screenshot',
   'zoom',
-  // High-performance batching & clipboard:
+  // High-performance batching, synchronization & clipboard:
   'execute_action_sequence',
   'clipboard_paste',
+  'wait_for_window',
 ]);
 
 export function filterToolsByProfile(tools: Tool[], profile: ToolProfile): Tool[] {

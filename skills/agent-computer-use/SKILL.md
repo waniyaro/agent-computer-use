@@ -1,13 +1,13 @@
 ---
 name: agent-computer-use
 description: Direct, robust, and policy-governed GUI automation on macOS using the agent-computer-use MCP proxy over Cua Driver. Enables window inspection, background UI interaction, accessibility element targeting, recovery, and audit logging.
-version: 1.3.0
+version: 1.4.0
 user-invocable: true
 ---
 
 # Agent Computer Use (macOS GUI Automation Playbook)
 
-This skill governs direct, fast, and reliable desktop automation on macOS via the `agent-computer-use` MCP server and Cua Driver backend.
+This skill governs direct, ultra-fast, and reliable desktop automation on macOS via the `agent-computer-use` MCP server and Cua Driver backend.
 
 ---
 
@@ -27,16 +27,23 @@ For standard desktop applications (1C:Enterprise, spreadsheets, forms, IDEs, dia
    - Bundle actions into a single `execute_action_sequence` call (e.g. `[press Insert, paste Name, press Tab, paste Type, press Enter]`).
    - Supports both `steps` and `actions` syntax.
    - Set `window_id` and default `delivery_mode` at the batch level; child steps automatically inherit them.
+   - **Safety halting (`stop_on_new_window: true`):** Pass `stop_on_new_window: true` when running batches. If an unexpected modal or alert dialog pops up mid-sequence, execution automatically pauses with `status: "paused_new_window"` to prevent destructive mis-clicks.
+4. **Zero-Latency Window Polling (`wait_for_window`):**
+   - **Never waste model roundtrips with blind `sleep` waiting for windows or dialogs to appear/close.**
+   - Call `wait_for_window({ title: "Конструктор", state: "opened", timeout_ms: 5000 })`. The proxy polls locally at 150ms intervals and returns within milliseconds once ready.
 
-### Tier 2: Visual Canvas (Direct Pixel & Screen Clicks)
-When navigating unmapped custom canvases, icons, tabs, or buttons:
-1. **Screenshot Coordinates (`x_pixel`, `y_pixel` or `x, y`):**
-   - Take a screenshot via `get_window_screenshot({ window_id })`.
-   - Pass exact pixel coordinates from the screenshot image. **DO NOT apply manual Retina scaling or point conversion multipliers** in agent code; Cua Driver maps screenshot pixels directly.
-2. **Precision Target Inspection (`zoom`):**
+### Tier 2: Visual Canvas (Hardware-Accelerated Screenshots & Scaling)
+When navigating custom canvases, icons, tabs, or buttons:
+1. **Hardware-Optimized Screenshots (`get_window_screenshot`):**
+   - By default, `get_window_screenshot` converts 5K/Retina PNGs into downsampled 1440px JPEGs via native macOS `sips` hardware acceleration.
+   - This slashes image payload from ~5 MB to ~150 KB and cuts model vision processing time from ~45s down to 5–8s.
+2. **Zero-Math Coordinate Preservation:**
+   - **DO NOT perform manual Retina or downscale mathematics.**
+   - Pass pixel coordinates `x_pixel, y_pixel` directly from the screenshot you see. The proxy tracks the downscale ratio internally and scales coordinates back to native window coordinates automatically for `visual_click`, `execute_action_sequence`, and `zoom`.
+3. **Precision Target Inspection (`zoom`):**
    - For tiny targets (e.g., 16×16 px toolbar icons, dense tree icons, small checkmarks):
    - Call `zoom({ window_id, x1, y1, x2, y2 })` to inspect the high-resolution crop before clicking, eliminating visual ambiguity and off-by-a-few-pixels errors.
-3. **Modal Dialogs & Non-Cocoa GUI Mandate (CRITICAL):**
+4. **Modal Dialogs & Non-Cocoa GUI Mandate (CRITICAL):**
    - **Modal windows, setup wizards, sheets, and thick-client apps (1C:Предприятие, Qt, Java Swing, Wine) DISCARD background synthetic AX events.**
    - Whenever clicking or typing into:
      - Modal dialogs (confirmation popups, file choosers, wizards like «Конструктор формы»)
@@ -96,6 +103,8 @@ If the host IDE client drops connection with `EOF` or `connection closed: client
    - Do not make a separate tool call and take a screenshot after every individual click in a known wizard or form sequence. Use `execute_action_sequence`.
 3. **NO Character-by-Character Typing for Code / Multiline Text:**
    - Do not call `type_text` for Russian text, formulas, or code blocks. Always use `clipboard_paste`.
+4. **NO Manual Sleeping for Modals:**
+   - Never call `sleep` waiting for a dialog to appear or close. Always use `wait_for_window`.
 
 ---
 
@@ -106,7 +115,7 @@ If the host IDE client drops connection with `EOF` or `connection closed: client
 > Verify state only at **Logical Milestones** (e.g., after completing an entire form row, submitting a dialog, or opening a new tab).
 
 1. **Initial Sense:** Inspect the window state (`list_windows` / `get_window_screenshot`) to locate initial target bounds.
-2. **Batch Act:** Execute the multi-step sequence via `execute_action_sequence`.
+2. **Batch Act:** Execute the multi-step sequence via `execute_action_sequence` (with `stop_on_new_window: true`).
 3. **Milestone Verify:** Take a screenshot or check window state once the batch completes to verify the intended outcome.
 
 ---
