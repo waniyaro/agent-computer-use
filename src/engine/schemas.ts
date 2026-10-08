@@ -35,6 +35,7 @@ export const ClipboardPasteInputSchema = z.object({
   window_id: z.number().int({ message: 'window_id must be an integer' }),
   pid: z.number().int({ message: 'pid must be an integer' }).optional(),
   text: z.string({ message: 'text must be a string' }),
+  delivery_mode: z.enum(['foreground', 'background']).optional().default('foreground'),
 });
 
 export type ClipboardPasteInput = z.infer<typeof ClipboardPasteInputSchema>;
@@ -154,18 +155,21 @@ export const ActionSequenceStepSchema = z.discriminatedUnion('action', [
     window_id: z.number().int().optional(),
     pid: z.number().int().optional(),
     text: z.string({ message: 'text is required for paste action' }),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
   }),
   z.object({
     action: z.literal('type'),
     window_id: z.number().int().optional(),
     pid: z.number().int().optional(),
     text: z.string({ message: 'text is required for type action' }),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
   }),
   z.object({
     action: z.literal('hotkey'),
     window_id: z.number().int().optional(),
     pid: z.number().int().optional(),
     keys: z.array(z.string()).min(1, 'keys array must contain at least one key'),
+    delivery_mode: z.enum(['foreground', 'background']).optional(),
   }),
   z.object({
     action: z.literal('sleep'),

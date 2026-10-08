@@ -154,6 +154,11 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
         window_id: { type: 'number', description: 'Target window ID' },
         pid: { type: 'number', description: 'Target process ID (optional, auto-resolved from window cache)' },
         text: { type: 'string', description: 'Text to copy to clipboard and paste' },
+        delivery_mode: {
+          type: 'string',
+          enum: ['foreground', 'background'],
+          description: 'Delivery mode for Cmd+V (default: foreground for reliable modal/editor paste)',
+        },
       },
       required: ['window_id', 'text'],
     },
@@ -285,7 +290,14 @@ export const CUSTOM_PROXY_TOOL_DEFINITIONS: Tool[] = [
 
 export function isWindowFocusError(errorText: string): boolean {
   if (!errorText) return false;
-  return errorText.toLowerCase().includes('exact target window did not become focused');
+  const lower = errorText.toLowerCase();
+  return (
+    lower.includes('exact target window did not become focused') ||
+    lower.includes('did not gain focus') ||
+    lower.includes('cannot be focused') ||
+    lower.includes('window focus timeout') ||
+    lower.includes('same_pid_keyboard_ambiguity')
+  );
 }
 
 export function isInsertKey(key: unknown): boolean {
@@ -1025,12 +1037,32 @@ export function createProxyServer(
         };
       }
 
-      const backendResult = await backend.callTool('hotkey', {
+      const targetDeliveryMode = input.delivery_mode ?? 'foreground';
+      let backendResult = await backend.callTool('hotkey', {
         pid: input.pid,
         window_id: input.window_id,
         keys: ['cmd', 'v'],
-        delivery_mode: 'background',
+        delivery_mode: targetDeliveryMode,
       });
+
+      let clipboardFallbackMode: string | undefined;
+      if (backendResult.isError && isWindowFocusError(extractErrorText(backendResult))) {
+        const altMode = targetDeliveryMode === 'foreground' ? 'background' : 'foreground';
+        logger.warn(
+          `Focus/ambiguity error in clipboard_paste (${extractErrorText(backendResult)}); retrying with delivery_mode='${altMode}'...`
+        );
+        const retryRes = await backend.callTool('hotkey', {
+          pid: input.pid,
+          window_id: input.window_id,
+          keys: ['cmd', 'v'],
+          delivery_mode: altMode,
+        });
+        if (!retryRes.isError) {
+          backendResult = retryRes;
+          clipboardFallbackMode = altMode;
+        }
+      }
+
       const durationMs = Date.now() - callStartTime;
 
       const windowInfo = enforcer?.getWindowInfo(input.window_id);
@@ -1050,7 +1082,9 @@ export function createProxyServer(
         content: [
           {
             type: 'text',
-            text: `Pasted text (${input.text.length} chars) into window ${input.window_id} via clipboard.`,
+            text: `Pasted text (${input.text.length} chars) into window ${input.window_id} via clipboard.${
+              clipboardFallbackMode ? ` (fallback to delivery_mode='${clipboardFallbackMode}')` : ''
+            }`,
           },
         ],
         structuredContent: {
@@ -1058,6 +1092,8 @@ export function createProxyServer(
           pid: input.pid,
           window_id: input.window_id,
           text_length: input.text.length,
+          delivery_mode: clipboardFallbackMode ?? targetDeliveryMode,
+          ...(clipboardFallbackMode ? { delivery_mode_fallback: true, fallback_delivery_mode: clipboardFallbackMode } : {}),
         },
       };
     }
@@ -1247,12 +1283,28 @@ export function createProxyServer(
               throw new Error("Step 'paste' requires window_id either on the step or at sequence level.");
             }
             setSystemClipboard(step.text);
-            const res = await backend.callTool('hotkey', {
+            const stepDelivery = step.delivery_mode ?? defaultDeliveryMode ?? 'foreground';
+            let res = await backend.callTool('hotkey', {
               pid: stepPid,
               window_id: stepWindowId,
               keys: ['cmd', 'v'],
-              delivery_mode: 'background',
+              delivery_mode: stepDelivery,
             });
+            if (res.isError && isWindowFocusError(extractErrorText(res))) {
+              const altMode = stepDelivery === 'foreground' ? 'background' : 'foreground';
+              logger.warn(`Focus/ambiguity error in paste step ${i + 1}; retrying with delivery_mode='${altMode}'...`);
+              const retryRes = await backend.callTool('hotkey', {
+                pid: stepPid,
+                window_id: stepWindowId,
+                keys: ['cmd', 'v'],
+                delivery_mode: altMode,
+              });
+              if (!retryRes.isError) {
+                res = retryRes;
+                stepDeliveryFallback = altMode;
+                sequenceFallbackOccurred = true;
+              }
+            }
             if (res.isError) {
               stepStatus = 'error';
               stepError = extractErrorText(res);
@@ -1261,12 +1313,28 @@ export function createProxyServer(
             if (stepWindowId === undefined || stepPid === undefined) {
               throw new Error("Step 'type' requires window_id either on the step or at sequence level.");
             }
-            const res = await backend.callTool('type_text', {
+            const stepDelivery = step.delivery_mode ?? defaultDeliveryMode ?? 'foreground';
+            let res = await backend.callTool('type_text', {
               pid: stepPid,
               window_id: stepWindowId,
               text: step.text,
-              delivery_mode: 'background',
+              delivery_mode: stepDelivery,
             });
+            if (res.isError && isWindowFocusError(extractErrorText(res))) {
+              const altMode = stepDelivery === 'foreground' ? 'background' : 'foreground';
+              logger.warn(`Focus/ambiguity error in type step ${i + 1}; retrying with delivery_mode='${altMode}'...`);
+              const retryRes = await backend.callTool('type_text', {
+                pid: stepPid,
+                window_id: stepWindowId,
+                text: step.text,
+                delivery_mode: altMode,
+              });
+              if (!retryRes.isError) {
+                res = retryRes;
+                stepDeliveryFallback = altMode;
+                sequenceFallbackOccurred = true;
+              }
+            }
             if (res.isError) {
               stepStatus = 'error';
               stepError = extractErrorText(res);
@@ -1280,38 +1348,51 @@ export function createProxyServer(
               sendMacInsertKeycode();
               res = { content: [{ type: 'text', text: 'Sent Insert keycode 114 via System Events' }], isError: false };
             } else {
+              const stepDelivery = step.delivery_mode ?? defaultDeliveryMode ?? 'foreground';
               const parsed = normalizeHotkey(step.keys);
               if (parsed.isSingleKey && parsed.singleKey) {
                 res = await backend.callTool('press_key', {
                   pid: stepPid,
                   window_id: stepWindowId,
                   key: parsed.singleKey,
-                  delivery_mode: 'background',
+                  delivery_mode: stepDelivery,
                 });
-                if (res.isError && extractErrorText(res).includes('same_pid_keyboard_ambiguity')) {
-                  logger.warn(`same_pid_keyboard_ambiguity in action sequence step ${i + 1}; retrying with foreground...`);
-                  res = await backend.callTool('press_key', {
+                if (res.isError && isWindowFocusError(extractErrorText(res))) {
+                  const altMode = stepDelivery === 'foreground' ? 'background' : 'foreground';
+                  logger.warn(`Focus/ambiguity in step ${i + 1}; retrying with delivery_mode='${altMode}'...`);
+                  const retryRes = await backend.callTool('press_key', {
                     pid: stepPid,
                     window_id: stepWindowId,
                     key: parsed.singleKey,
-                    delivery_mode: 'foreground',
+                    delivery_mode: altMode,
                   });
+                  if (!retryRes.isError) {
+                    res = retryRes;
+                    stepDeliveryFallback = altMode;
+                    sequenceFallbackOccurred = true;
+                  }
                 }
               } else {
                 res = await backend.callTool('hotkey', {
                   pid: stepPid,
                   window_id: stepWindowId,
                   keys: parsed.chord ?? step.keys,
-                  delivery_mode: 'background',
+                  delivery_mode: stepDelivery,
                 });
-                if (res.isError && extractErrorText(res).includes('same_pid_keyboard_ambiguity')) {
-                  logger.warn(`same_pid_keyboard_ambiguity in action sequence step ${i + 1}; retrying with foreground...`);
-                  res = await backend.callTool('hotkey', {
+                if (res.isError && isWindowFocusError(extractErrorText(res))) {
+                  const altMode = stepDelivery === 'foreground' ? 'background' : 'foreground';
+                  logger.warn(`Focus/ambiguity in step ${i + 1}; retrying with delivery_mode='${altMode}'...`);
+                  const retryRes = await backend.callTool('hotkey', {
                     pid: stepPid,
                     window_id: stepWindowId,
                     keys: parsed.chord ?? step.keys,
-                    delivery_mode: 'foreground',
+                    delivery_mode: altMode,
                   });
+                  if (!retryRes.isError) {
+                    res = retryRes;
+                    stepDeliveryFallback = altMode;
+                    sequenceFallbackOccurred = true;
+                  }
                 }
               }
             }
@@ -1426,13 +1507,13 @@ export function createProxyServer(
       let result: CallToolResult = await backend.callTool(name, args);
       let backendFallbackMode: string | undefined;
 
-      // Auto-fallback for same_pid_keyboard_ambiguity on hotkey/press_key
+      // Auto-fallback for focus/ambiguity errors on keyboard tools
       if (
-        (name === 'press_key' || name === 'hotkey') &&
+        (name === 'press_key' || name === 'hotkey' || name === 'type_text') &&
         result.isError &&
-        extractErrorText(result).includes('same_pid_keyboard_ambiguity')
+        isWindowFocusError(extractErrorText(result))
       ) {
-        logger.warn(`same_pid_keyboard_ambiguity in ${name}; retrying with delivery_mode='foreground'...`);
+        logger.warn(`Focus/ambiguity error in ${name}; retrying with delivery_mode='foreground'...`);
         const retryArgs = { ...args, delivery_mode: 'foreground' };
         const retryRes = await backend.callTool(name, retryArgs);
         if (!retryRes.isError) {
