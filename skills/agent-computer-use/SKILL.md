@@ -108,6 +108,14 @@ If the host IDE client drops connection with `EOF` or `connection closed: client
    - Do not call `type_text` for Russian text, formulas, or code blocks. Always use `clipboard_paste`.
 4. **NO Manual Sleeping for Modals:**
    - Never call `sleep` waiting for a dialog to appear or close. Always use `wait_for_window`.
+5. **NO Blind Backspacing or Improvisation on Errors (Emergency Escape Protocol):**
+   - If trapped in an unexpected dialog, autocomplete popup, or invalid field state, **do not send blind repeated Backspaces or random clicks**.
+   - Execute the deterministic recovery protocol:
+     1. Send `Escape` to dismiss modal tooltips, dropdowns, or uncommitted suggestions.
+     2. Send `Cmd+A` followed by `Delete` (Backspace) to wipe any broken field text cleanly in 1 step.
+     3. Take a milestone screenshot to inspect the reset state.
+6. **NO Capturing Clipped / Off-Screen Windows:**
+   - If a target window hangs off the edge of the screen (`x < 0` or dimensions exceed screen boundaries), the macOS compositor captures blank gray or clipped pixels. Ensure the window is centered or maximized before relying on screenshot coordinates.
 
 ---
 
