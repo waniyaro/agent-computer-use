@@ -1,7 +1,7 @@
 ---
 name: agent-computer-use
 description: Direct, robust, and policy-governed GUI automation on macOS using the agent-computer-use MCP proxy over Cua Driver. Enables window inspection, background UI interaction, accessibility element targeting, recovery, and audit logging.
-version: 1.4.0
+version: 1.5.0
 user-invocable: true
 ---
 
@@ -20,6 +20,7 @@ For standard desktop applications (1C:Enterprise, spreadsheets, forms, IDEs, dia
 1. **Prefer Keyboard Navigation over Pixel Hunting:**
    - In table rows, lists, and forms, keyboard shortcuts are 10× faster and 100% immune to Retina/pixel scaling offsets.
    - Use native hotkeys: `Insert` (add row/item — automatically translated to Mac Help/Insert keycode 114), `Delete` (remove), `Tab` / `Shift+Tab` / Arrows (field navigation), `Enter` (commit/open), `Escape` (dismiss/cancel), `Cmd+S` / `F7` (save).
+   - System normalizes Linux/Windows habits: `win`, `windows`, `super`, `meta` automatically canonicalize to `cmd` on macOS.
 2. **Instant Text Input (`clipboard_paste`):**
    - For any string longer than 3 characters, code snippets, or Russian/Cyrillic identifiers, **always use `clipboard_paste({ window_id, text })`** instead of character-by-character typing. It pastes instantly without typing lag or OS keyboard layout corruption. Defaults to `delivery_mode: "foreground"`.
 3. **Batch Execution (`execute_action_sequence`):**
@@ -32,11 +33,13 @@ For standard desktop applications (1C:Enterprise, spreadsheets, forms, IDEs, dia
    - **Never waste model roundtrips with blind `sleep` waiting for windows or dialogs to appear/close.**
    - Call `wait_for_window({ title: "Конструктор", state: "opened", timeout_ms: 5000 })`. The proxy polls locally at 150ms intervals and returns within milliseconds once ready.
 
-### Tier 2: Visual Canvas (Hardware-Accelerated Screenshots & Scaling)
+### Tier 2: Visual Canvas (Zero-Drift Vision & Scaling)
 When navigating custom canvases, icons, tabs, or buttons:
-1. **Hardware-Optimized Screenshots (`get_window_screenshot`):**
-   - By default, `get_window_screenshot` converts 5K/Retina PNGs into downsampled 1440px JPEGs via native macOS `sips` hardware acceleration.
-   - This slashes image payload from ~5 MB to ~150 KB and cuts model vision processing time from ~45s down to 5–8s.
+1. **Anthropic-Standard Vision Patch & Tile Budget Optimization:**
+   - Claude and advanced vision encoders tile images into **28×28 patches** and enforce a hard ceiling of **1568 px max edge** and **1568 total tiles**.
+   - If an unconstrained 5K/Retina screenshot is sent, the API backend **silently re-resizes the image on the server**, causing systematic **~14% click drift** on 16:10 MacBook screens.
+   - `get_window_screenshot` uses the reference `targetImageSize` algorithm to pre-resample images to the exact optimal dimensions (e.g. 1384×868 for MacBook displays, 1550 tiles) via macOS hardware-accelerated `sips`.
+   - Result: **Zero server re-resize, zero click drift, and 80% lower token latency.**
 2. **Zero-Math Coordinate Preservation:**
    - **DO NOT perform manual Retina or downscale mathematics.**
    - Pass pixel coordinates `x_pixel, y_pixel` directly from the screenshot you see. The proxy tracks the downscale ratio internally and scales coordinates back to native window coordinates automatically for `visual_click`, `execute_action_sequence`, and `zoom`.

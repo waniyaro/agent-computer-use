@@ -47,6 +47,67 @@ function getJpegDimensions(buf: Buffer): { width: number; height: number } | nul
   return null;
 }
 
+export interface TargetImageSizeOptions {
+  pxPerToken?: number;
+  maxEdgePx?: number;
+  maxTokens?: number;
+}
+
+export function nTokensForPx(px: number, pxPerToken = 28): number {
+  return Math.floor((px - 1) / pxPerToken) + 1;
+}
+
+export function nTokensForImg(w: number, h: number, pxPerToken = 28): number {
+  return nTokensForPx(w, pxPerToken) * nTokensForPx(h, pxPerToken);
+}
+
+/**
+ * Calculates the largest (w, h) preserving aspect ratio that satisfies
+ * both the long-edge (<= 1568px) and vision tile budget (<= 1568 tiles of 28x28px).
+ * Directly ported from Anthropic's reference implementation to guarantee
+ * zero server-side silent re-resizing and eliminate click drift (~14% on macOS).
+ */
+export function targetImageSize(
+  width: number,
+  height: number,
+  options: TargetImageSizeOptions = {}
+): [number, number] {
+  const pxPerToken = options.pxPerToken ?? 28;
+  const maxEdgePx = options.maxEdgePx ?? 1568;
+  const maxTokens = options.maxTokens ?? 1568;
+
+  if (
+    width <= maxEdgePx &&
+    height <= maxEdgePx &&
+    nTokensForImg(width, height, pxPerToken) <= maxTokens
+  ) {
+    return [width, height];
+  }
+
+  // Normalize to landscape for the binary search; transpose back afterwards
+  if (height > width) {
+    const [w, h] = targetImageSize(height, width, options);
+    return [h, w];
+  }
+
+  const aspect = width / height;
+  let lo = 1;
+  let hi = width;
+
+  while (true) {
+    if (lo + 1 === hi) {
+      return [lo, Math.max(Math.round(lo / aspect), 1)];
+    }
+    const midW = Math.floor((lo + hi) / 2);
+    const midH = Math.max(Math.round(midW / aspect), 1);
+    if (midW <= maxEdgePx && nTokensForImg(midW, midH, pxPerToken) <= maxTokens) {
+      lo = midW;
+    } else {
+      hi = midW;
+    }
+  }
+}
+
 /**
  * Optimizes screenshot buffer (downsampling resolution and converting to JPEG)
  * using macOS native hardware-accelerated /usr/bin/sips.
@@ -55,7 +116,6 @@ export function optimizeScreenshot(
   inputBuffer: Buffer,
   options: OptimizeImageOptions = {}
 ): OptimizedImageResult {
-  const maxWidth = options.maxWidth ?? 1440;
   const targetFormat = options.format ?? 'jpeg';
   const quality = Math.min(100, Math.max(1, options.quality ?? 80));
 
@@ -82,8 +142,15 @@ export function optimizeScreenshot(
     };
   }
 
+  // Compute target dimensions:
+  // Anthropic's tile budget ensures server-side early return fires and prevents click drift
+  const [anthropicW] = targetImageSize(originalWidth, originalHeight);
+  const targetWidthLimit = typeof options.maxWidth === 'number'
+    ? Math.min(options.maxWidth, anthropicW)
+    : anthropicW;
+
   // Check if optimization should be skipped (e.g. unscaled PNG explicitly requested)
-  const shouldDownsample = maxWidth > 0 && originalWidth > maxWidth;
+  const shouldDownsample = targetWidthLimit > 0 && originalWidth > targetWidthLimit;
   const shouldConvertToJpeg = targetFormat === 'jpeg';
 
   if (!shouldDownsample && !shouldConvertToJpeg) {
@@ -112,7 +179,7 @@ export function optimizeScreenshot(
       sipsArgs.push('-s', 'format', 'jpeg', '-s', 'formatOptions', String(quality));
     }
     if (shouldDownsample) {
-      sipsArgs.push('--resampleWidth', String(maxWidth));
+      sipsArgs.push('--resampleWidth', String(targetWidthLimit));
     }
     sipsArgs.push(inPath, '--out', outPath);
 

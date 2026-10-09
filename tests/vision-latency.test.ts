@@ -9,7 +9,8 @@ import { PolicyConfigSchema } from '../src/policy/schema.js';
 import { AuditLogger } from '../src/audit/logger.js';
 import { createProxyServer } from '../src/server.js';
 import { CuaDriverBackend } from '../src/backend/cua-driver.js';
-import { optimizeScreenshot } from '../src/engine/image-optimizer.js';
+import { optimizeScreenshot, targetImageSize, nTokensForImg } from '../src/engine/image-optimizer.js';
+import { BATCH_REMINDER_TEXT } from '../src/server.js';
 
 const mockServerPath = path.resolve(__dirname, 'fixtures/mock-mcp-server.mjs');
 
@@ -249,6 +250,83 @@ describe('Vision Engine & Latency Optimization Tests', () => {
     const sc = res.structuredContent as Record<string, any>;
     expect(sc.status).toBe('ok');
     expect(sc.executed_steps).toBe(3);
+
+    await client.close();
+    await server.close();
+    await backend.stop();
+  });
+
+  it('6. targetImageSize adheres strictly to 1568-tile and 1568px long-edge budget (Anthropic standard)', () => {
+    // 16:10 MacBook native resolution (e.g. 1710x1073 or 3420x2146)
+    const [w1, h1] = targetImageSize(1710, 1073);
+    expect(w1).toBe(1384);
+    expect(h1).toBe(868);
+    expect(w1).toBeLessThanOrEqual(1568);
+    expect(h1).toBeLessThanOrEqual(1568);
+    expect(nTokensForImg(w1, h1)).toBeLessThanOrEqual(1568);
+
+    const [w2, h2] = targetImageSize(3420, 2146);
+    expect(w2).toBe(1384);
+    expect(h2).toBe(868);
+    expect(nTokensForImg(w2, h2)).toBeLessThanOrEqual(1568);
+
+    // Standard 4:3 display (1600x1200)
+    const [w3, h3] = targetImageSize(1600, 1200);
+    expect(w3).toBe(1269);
+    expect(h3).toBe(952);
+    expect(nTokensForImg(w3, h3)).toBeLessThanOrEqual(1568);
+
+    // Small image within budget returns unchanged
+    const [w4, h4] = targetImageSize(800, 600);
+    expect(w4).toBe(800);
+    expect(h4).toBe(600);
+  });
+
+  it('7. standalone pointer action returns batch reminder to steer model toward execute_action_sequence', async () => {
+    const config = PolicyConfigSchema.parse({
+      allowedApps: ['com.google.antigravity-ide'],
+      deniedApps: [],
+    });
+
+    const audit = new AuditLogger(auditLogPath);
+    const enforcer = new PolicyEnforcer(config, stopFilePath);
+    enforcer.updateWindowCache([
+      {
+        pid: 500,
+        window_id: 10,
+        app_name: 'Antigravity IDE',
+        bundle_id: 'com.google.antigravity-ide',
+        bounds: { x: 100, y: 100, width: 800, height: 600 },
+      },
+    ]);
+
+    const backend = new CuaDriverBackend({
+      command: 'node',
+      args: [mockServerPath],
+    });
+    await backend.start();
+
+    const server = createProxyServer(backend, enforcer, audit);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    await server.connect(serverTransport);
+    const client = new Client({ name: 'test-client', version: '1.0.0' }, { capabilities: {} });
+    await client.connect(clientTransport);
+
+    const res = await client.callTool({
+      name: 'visual_click',
+      arguments: {
+        window_id: 10,
+        x_pixel: 200,
+        y_pixel: 150,
+      },
+    });
+
+    expect(res.isError).toBeFalsy();
+    const textItem = res.content?.find((c) => c.type === 'text');
+    expect(textItem).toBeDefined();
+    expect((textItem as any).text).toContain('<reminder>');
+    expect((textItem as any).text).toContain('execute_action_sequence');
 
     await client.close();
     await server.close();

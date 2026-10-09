@@ -358,6 +358,33 @@ export function sendMacInsertKeycode(): void {
   }
 }
 
+export const SINGLE_ACTION_TOOLS: ReadonlySet<string> = new Set([
+  'click',
+  'double_click',
+  'right_click',
+  'press_key',
+  'hotkey',
+  'type_text',
+  'scroll',
+  'visual_click',
+  'press_hotkey',
+  'clipboard_paste',
+]);
+
+export const BATCH_REMINDER_TEXT =
+  '\n\n<reminder>Tip: You executed a single standalone action. For significantly faster execution, use execute_action_sequence to batch multiple steps (clicks, keystrokes, pastes) in one call.</reminder>';
+
+export function attachBatchReminderIfNeeded(toolName: string, result: CallToolResult): void {
+  if (SINGLE_ACTION_TOOLS.has(toolName) && !result.isError && Array.isArray(result.content)) {
+    const textItem = result.content.find((c) => c.type === 'text');
+    if (textItem && typeof (textItem as { text?: string }).text === 'string') {
+      (textItem as { text: string }).text += BATCH_REMINDER_TEXT;
+    } else {
+      result.content.push({ type: 'text', text: BATCH_REMINDER_TEXT.trim() });
+    }
+  }
+}
+
 export function createProxyServer(
   backend: CuaDriverBackend,
   enforcer?: PolicyEnforcer,
@@ -811,7 +838,7 @@ export function createProxyServer(
         structuredResult.fallback_delivery_mode = fallbackDeliveryMode;
       }
 
-      return {
+      const toolRes: CallToolResult = {
         content: [
           {
             type: 'text',
@@ -822,6 +849,8 @@ export function createProxyServer(
         ],
         structuredContent: structuredResult,
       };
+      attachBatchReminderIfNeeded(name, toolRes);
+      return toolRes;
     }
 
     // --- Vision Tool 2: press_hotkey ---
@@ -905,7 +934,7 @@ export function createProxyServer(
         return backendResult;
       }
 
-      return {
+      const toolRes: CallToolResult = {
         content: [
           {
             type: 'text',
@@ -920,6 +949,8 @@ export function createProxyServer(
           window_id: input.window_id,
         },
       };
+      attachBatchReminderIfNeeded(name, toolRes);
+      return toolRes;
     }
 
     // --- Vision Tool 3: get_window_screenshot ---
@@ -1140,7 +1171,7 @@ export function createProxyServer(
         return backendResult;
       }
 
-      return {
+      const toolRes: CallToolResult = {
         content: [
           {
             type: 'text',
@@ -1158,6 +1189,8 @@ export function createProxyServer(
           ...(clipboardFallbackMode ? { delivery_mode_fallback: true, fallback_delivery_mode: clipboardFallbackMode } : {}),
         },
       };
+      attachBatchReminderIfNeeded(name, toolRes);
+      return toolRes;
     }
 
     // --- Vision Tool 5: execute_action_sequence ---
@@ -1715,10 +1748,12 @@ export function createProxyServer(
       // Special interception for press_key with 'insert' / 'help'
       if (name === 'press_key' && isInsertKey(callArgs.key)) {
         sendMacInsertKeycode();
-        return {
+        const toolRes: CallToolResult = {
           content: [{ type: 'text', text: `Key [${callArgs.key}] sent successfully via macOS key code 114 (Help/Insert).` }],
           structuredContent: { status: 'ok', key: callArgs.key, window_id: callArgs.window_id },
         };
+        attachBatchReminderIfNeeded(name, toolRes);
+        return toolRes;
       }
 
       // Execute on backend with duration measurement
@@ -1869,6 +1904,7 @@ export function createProxyServer(
         },
       });
 
+      attachBatchReminderIfNeeded(name, result);
       return result;
     }
 
@@ -1919,6 +1955,7 @@ export function createProxyServer(
         }
       }
     }
+    attachBatchReminderIfNeeded(name, result);
     return result;
   });
 

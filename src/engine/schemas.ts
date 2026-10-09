@@ -255,6 +255,10 @@ const MODIFIER_NAMES: ReadonlySet<string> = new Set([
   'opt',
   'shift',
   'fn',
+  'super',
+  'win',
+  'windows',
+  'meta',
 ]);
 
 export function canonicalizeKey(key: string): string {
@@ -262,6 +266,10 @@ export function canonicalizeKey(key: string): string {
   switch (k) {
     case 'command':
     case 'cmd':
+    case 'super':
+    case 'win':
+    case 'windows':
+    case 'meta':
       return 'cmd';
     case 'control':
     case 'ctrl':
